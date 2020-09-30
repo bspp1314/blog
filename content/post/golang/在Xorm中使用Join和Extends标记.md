@@ -1,7 +1,7 @@
 ---
 title: "在Xorm中使用Join和Extends标记"
 date: 2020-08-19T15:03:01+08:00
-draft: true
+draft: false
 categories: ["golang"]
 tags: ["xorm"]
 ---
