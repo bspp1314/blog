@@ -10,154 +10,58 @@ draft: true
 
 
 
-# 安装JDK 
+# 安装elasticsearch
+下载镜像
+```
+docker pull docker.elastic.co/elasticsearch/elasticsearch:7.9.0
+```
+创建挂载的目录
 
-网上教程很多，也可以教程之前写的[Linux安装JDK](https://www.jianshu.com/p/4418cb3bda31)
+```
+mkdir -p /home/linyuanpeng/data/elasticsearch/data
+mkdir -p /home/linyuanpeng/data/elasticsearch/config
+echo "http.host: 0.0.0.0" >> /home/linyuanpeng/data/elasticsearch/configelasticsearch.yml
+```
 
-
-
-# 安装Elasticsearch 
+创建容器并启动
 
 ```shell
-mkdir -p  /usr/local/tool/elasticsearch && cd /usr/local/tool/elasticsearch
-curl -L -O https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-7.9.1-linux-x86_64.tar.gz
-tar -xvf elasticsearch-7.9.1-linux-x86_64.tar.gz
-cd elasticsearch-7.9.1/bin
-./elasticsearch
+docker run --name elasticsearch -p 9200:9200 -p 9300:9300  -e "discovery.type=single-node" -v /home/linyuanpeng/data/elasticsearch/config/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml -v /home/linyuanpeng/data/elasticsearch/data:/usr/share/elasticsearch/data -v /home/linyuanpeng/data/elasticsearch/plugins:/usr/share/elasticsearch/plugins -d elasticsearch:7.9.0
+
+其中elasticsearch.yml是挂载的配置文件，data是挂载的数据，plugins是es的插件，如ik，而数据挂载需要权限，需要设置data文件的权限为可读可写,需要下边的指令。
+chmod -R 777 要修改的路径
+
+-e "discovery.type=single-node" 设置为单节点
+```
+
+# 安装Kibana 
+
+# 下载镜像
+
+```
+docker pull docker.elastic.co/kibana/kibana:7.9.0
 
 ```
 
 
 
-# 遇到的坑
-
-```java
-org.elasticsearch.bootstrap.StartupException: java.lang.RuntimeException: can not run elasticsearch as root
 ```
 
-这个问题很明显，不允许使用root用户启动，那么我们新建一个es用户，并赋予权限：
-
-```shell
-useradd es
-```
+docker run --name kibana -e ELASTICSEARCH_HOSTS=http://自己的IP地址:9200 -p 5601:5601 -d docker.elastic.co/kibana/kibana:7.9.0:7.6.2
 
 
+进入容器修改相应内容
+server.port: 5601
+server.host: 0.0.0.0
+elasticsearch.hosts: [ "http://自己的IP地址:9200" ]
+i18n.locale: "Zh-CN"
 
-添加es用户密码
+然后访问页面
+http://10.249.172.203:5601/app/kibana
 
-```shell
-passwd es 
-```
-
-将文件夹elasticsearch-7.9.1赋予es权限
-
-```
-chown -R es:es /usr/local/tool/elasticsearch/elasticsearch-7.9.1
-```
-
-将文件夹elasticsearch-5.4.2赋予es权限
-
-切换为es用户
-
-```shell
-su es
-```
-
-再次启动
-
-```shell
-./elasticsearch
-```
-
-这次启动就成功了，使用一个窗口登录root用户，输入命令：
-
-
-
-```shell
-curl -X GET http://localhost:9200
-{
-  "name" : "xxxxxxxxxxxxxxxxxx",
-  "cluster_name" : "elasticsearch",
-  "cluster_uuid" : "Mx8xFL9hQj2kSRwdbXRz0g",
-  "version" : {
-    "number" : "7.9.1",
-    "build_flavor" : "default",
-    "build_type" : "tar",
-    "build_hash" : "083627f112ba94dffc1232e8b42b73492789ef91",
-    "build_date" : "2020-09-01T21:22:21.964974Z",
-    "build_snapshot" : false,
-    "lucene_version" : "8.6.2",
-    "minimum_wire_compatibility_version" : "6.8.0",
-    "minimum_index_compatibility_version" : "6.0.0-beta1"
-  },
-  "tagline" : "You Know, for Search"
-  }
 ```
 
 
-
-在浏览器访问http://xx.xx.xx.xx:9200/拒绝访问（xx.xx.xx.xx为服务器ip）
-
-使用root用户，打开elasticsearch.yml文件
-
-```
-network.host: 0.0.0.0
-```
-
-使用es用户启动，发现又出现了错误
-
-```java
-max virtual memory areas vm.max_map_count[65530] is too low,increate to at least 
-```
-
-使用root用户打开如下文件：
-
-```
-vi /etc/security/limits.conf
-```
-
-添加配置如下
-
-```
-hadoop soft nofile 65536
-hadoop hard nofile 131072
-hadoop soft nproc 2048
-hadoop hard nproc 4096
-```
-
-
-
-打开文件
-
-```
-vim /etc/sysctl.conf
-```
-
-添加如下配置
-
-```
-vm.max_map_count = 655360
-```
-
-使配置生效
-
-```
-/sbin/sysctl -p
-```
-
-然后又遇到了如下问题
-
-```
-the default discovery settings are unsuitable for production use; at least one of [discovery.seed_hosts, discovery.seed_providers, cluster.initial_master_nodes] must be configured
-```
-
-这个问题是和集群相关配置出了问题，这里我们先不关心集群配置，只用单机模式。
-
-在elasticsearch的配置文件里面添加
-
-```
-discovery.type: single-node
-```
 
 # 基本概念
 
