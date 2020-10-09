@@ -378,6 +378,16 @@ out
 
 
 
+# 一些使用中的问题
+
+oneof 要包含空 
+
+```
+validate:"oneof='' 'Redis' 'Pika'"
+```
+
+
+
 
 
 

@@ -57,7 +57,7 @@ elasticsearch.hosts: [ "http://自己的IP地址:9200" ]
 i18n.locale: "Zh-CN"
 
 然后访问页面
-http://10.249.172.203:5601/app/kibana
+http://xx.xx.xx.xx:5601/app/kibana
 
 ```
 
