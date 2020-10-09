@@ -2,7 +2,6 @@
 title: "Go常见库之logrus"
 date: 2020-09-15T17:39:25+08:00
 draft: false
-draft: false
 categories: ["golang","golang常见库"]
 tags: ["日志"]
 ---

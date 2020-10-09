@@ -1,12 +1,13 @@
 ---
-title: "Go常见库之Sync"
+title: "Go常见库之Sync.Pool"
 date: 2020-09-16T13:57:39+08:00
 draft: true
+categories: ["golang","golang常见库"]
 ---
 
 # 简介
 
-sync.Pool 是 [sync](https://github.com/golang/go/blob/master/src/sync/pool.go) 包下的一个组件,可以保存和检索临时对象的池子
+sync.Pool 是 [sync](https://github.com/golang/go/blob/master/src/sync/pool.go) 包下的一个组件,可以保存和检索临时对象的池子。<!--more-->
 
 > A Pool is a set of temporary objects that may be individually saved and retrieved.
 >
