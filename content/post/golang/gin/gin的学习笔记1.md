@@ -312,6 +312,72 @@ $ curl -X POST http://0.0.0.0:8080/upload -F "file=@/Users/linyuanpeng/workplace
 
 ## Gin 处理Json 
 
+application/json 这个 Content-Type 几乎是最常用到的一种格式。实际上，现在越来越多的人把它作为请求头，用来告诉服务端消息主体是序列化后的 JSON 字符串。gin中当然也支持这种格式的解析了。我们直接来看代码
+
+```go
+func main() {
+	r := gin.Default()
+
+	r.POST("/user/create", UserCreateAction)
+	r.Run()
+}
+
+type UserCreateReq struct {
+	UserName  string `json:"user_name"`
+	UserEmail string `json:"user_email"`
+}
+type User struct {
+	ID        int64  `json:"id"`
+	UserName  string `json:"user_name"`
+	UserEmail string `json:"user_email"`
+}
+
+type RespData struct {
+	ErrorNo  int64  `json:"err_no"`
+	ErrorMsg string `json:"err_msg"`
+	Data     interface{} `json:"data"`
+}
+
+func SetData(c *gin.Context,data interface{})  {
+	c.JSON(http.StatusOK,&RespData{
+		ErrorNo:  0,
+		ErrorMsg: "",
+		Data:     data,
+	})
+}
+
+func SetError(c *gin.Context,err error, errNo int64)  {
+	c.JSON(http.StatusOK,&RespData{
+		ErrorNo:  errNo,
+		ErrorMsg: err.Error(),
+		Data:     nil,
+	})
+}
+
+
+func UserCreateAction(c *gin.Context) {
+	var req UserCreateReq
+	err := c.ShouldBind(&req)
+	if err != nil {
+		SetError(c,err,1)
+		return
+	}
+
+	c.JSON(200, &User{
+		ID:        1,
+		UserName:  req.UserName,
+		UserEmail: req.UserEmail,
+	})
+}
+```
+
+
+
+```shell
+curl -X POST http://0.0.0.0:8080/user/create -d '{"user_name": "张三", "user_email": "zhangsan@163.com"}' -H "Content-Type: applicatiojson"
+{"id":1,"user_name":"张三","user_email":"zhangsan@163.com"}
+```
+
 
 
 
