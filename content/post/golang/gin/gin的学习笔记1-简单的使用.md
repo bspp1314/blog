@@ -1,8 +1,8 @@
 ---
 
-title: "Gin的学习笔记1"
+title: "Gin的学习笔记1-简单的使用"
 date: 2020-10-09T18:49:19+08:00
-draft: true
+draft: false
 ---
 
 # gin 是什么

@@ -251,8 +251,6 @@ func (sh serverHandler) ServeHTTP(rw ResponseWriter, req *Request) {
 
 这里的hander就是服务器初始化处理的的hander,在net.http里面默认的hander是ServeMux，所以接下来我们需要看这个
 
-
-
 ```go
 // net/http/server.go:L2352-2362
 func (mux *ServeMux) ServeHTTP(w ResponseWriter, r *Request) {
