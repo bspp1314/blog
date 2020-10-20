@@ -2,6 +2,7 @@
 title: "Redis字符串"
 date: 2020-10-10T17:09:21+08:00
 draft: false 
+categories: ["redis"]
 ---
 
 # 概述

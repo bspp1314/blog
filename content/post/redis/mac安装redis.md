@@ -2,6 +2,7 @@
 title: "Mac安装redis"
 date: 2020-10-10T17:06:12+08:00
 draft: false
+categories: ["redis"]
 ---
 
 下载Redis

@@ -2,6 +2,8 @@
 title: "Gin的学习笔记2 中间件的使用"
 date: 2020-10-19T10:41:16+08:00
 draft: false
+tag: ["gin","http"]
+categories: ["golang"]
 ---
 
 # Gin中间件的作用
