@@ -3,8 +3,8 @@
 title: "Gin的学习笔记1-简单的使用"
 date: 2020-10-09T18:49:19+08:00
 draft: false
-tag: ["gin","http"]
-categories: ["golang"]
+tag: ["http","gin"]
+categories: ["golang","gin"]
 ---
 
 # gin 是什么
