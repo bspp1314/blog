@@ -8,7 +8,7 @@ categories: ["golang"]
 
 # 简单的使用
 
-对于Golang来说，实现一个简单的`http server`非常容易，只需要短短几行代码。我们直接来看一个简单的例子
+对于Golang来说，实现一个简单的`http server`非常容易，只需要短短几行代码。我们直接来看一个简单的例子。<!--more-->
 
 ```go
 func main() {
