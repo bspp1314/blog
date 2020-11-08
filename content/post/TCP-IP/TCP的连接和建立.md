@@ -2,7 +2,8 @@
 
 title: "TCP-IP详情阅读笔记-18TCP的连接和建立阅读笔记"
 date: 2020-10-31T20:44:08+08:00
-draft: true
+draft: false
+tag:["tcp","网络"]
 ---
 
 **TCP是一个面向连接的协议，无论哪一个方向向另一方向发送数据，都必须先在双方之间建立一条连接。**
@@ -69,22 +70,22 @@ tcpdump -i eth0 -n 'port 6378 and tcp'  -X -s 0 -S
 同样我们可以用telnet模拟断开连接的过程
 
 ```go
-18:19:17.089341 IP 10.249.172.203.6378 > 10.249.172.42.33964: Flags [F.], seq 2221282036, ack 81895238, win 227, options [nop,nop,TS val 2281089934 ecr 3050393501], length 0
+18:19:17.089341 IP 192.168.1.10.6378 > 192.168.1.11.33964: Flags [F.], seq 2221282036, ack 81895238, win 227, options [nop,nop,TS val 2281089934 ecr 3050393501], length 0
   0x0000:  {4500 0034 5f2b 4000 3f06 6db1 0af9 accb  E..4_+@.?.m.....
   0x0010:  0af9 ac2a} 18ea 84ac 8466 12f4 04e1 9f46  ...*.....f.....F
 	0x0020: 【8010】00e3 6f0e 0000 0101 080a 87f6 ab8e  ....o...........
   0x0030:  b5d1 4f9d                            ..O.
-18:19:17.089579 IP 10.249.172.42.33964 > 10.249.172.203.6378: Flags [.], ack 2221282036, win 229, options [nop,nop,TS val 3050393501 ecr 2281089934], length 0
+18:19:17.089579 IP 192.168.1.11.33964 > 192.168.1.10.6378: Flags [.], ack 2221282036, win 229, options [nop,nop,TS val 3050393501 ecr 2281089934], length 0
 	0x0000:  4510 0034 6eee 4000 4006 5cde 0af9 ac2a  E..4n.@.@.\....*
 	0x0010:  0af9 accb 84ac 18ea 04e1 9f46 8466 12f4  ...........F.f..
 	0x0020:  【8010】 00e5 f4e3 0000 0101 080a b5d1 4f9d  ..............O.
 	0x0030:  87f6 ab8e                                ....
-18:19:17.089787 IP 10.249.172.42.33964 > 10.249.172.203.6378: Flags [F.], seq 81895238, ack 2221282037, win 229, options [nop,nop,TS val 3050393502 ecr 2281089934], length 0
+18:19:17.089787 IP 192.168.1.11.33964 > 192.168.1.10.6378: Flags [F.], seq 81895238, ack 2221282037, win 229, options [nop,nop,TS val 3050393502 ecr 2281089934], length 0
 	0x0000:  4510 0034 6eef 4000 4006 5cdd 0af9 ac2a  E..4n.@.@.\....*
 	0x0010:  0af9 accb 84ac 18ea 04e1 9f46 8466 12f5  ...........F.f..
 	0x0020: 【8010】 00e5 f4e0 0000 0101 080a b5d1 4f9e  ..............O.
 	0x0030:  87f6 ab8e                                ....
-18:19:17.089833 IP 10.249.172.203.6378 > 10.249.172.42.33964: Flags [.], ack 81895239, win 227, options [nop,nop,TS val 2281089935 ecr 3050393502], length 0
+18:19:17.089833 IP 192.168.1.10.6378 > 192.168.1.11.33964: Flags [.], ack 81895239, win 227, options [nop,nop,TS val 2281089935 ecr 3050393502], length 0
 	0x0000:  4500 0034 5f2c 4000 3f06 6db0 0af9 accb  E..4_,@.?.m.....
 	0x0010:  0af9 ac2a 18ea 84ac 8466 12f5 04e1 9f47  ...*.....f.....G
 	0x0020:  【8010】 00e3 6f0e 0000 0101 080a 87f6 ab8f  ....o...........
@@ -123,13 +124,30 @@ tcpdump -i eth0 -n 'port 6378 and tcp'  -X -s 0 -S
 
 使用 TCP 协议通信的双方会在关闭连接时触发 `TIME_WAIT` 状态，IME_WAIT状态也称为2MSL等待状态。每个具体TCP实现必须选择一个报文段最大生存时间MSL（Maximum Segment Lifetime）。
 
-一个常见的关闭连接过程：
+>TIME-WAIT - represents waiting for enough time to pass to be sure the remote TCP received the acknowledgment of its connection termination request.
+
+
+
+
+一个常见的关闭连接状态变化过程：
 
 1. 当客户端没有待发送的数据时，它会向服务端发送 `FIN` 消息，发送消息后会进入 `FIN_WAIT_1` 状态；
 2. 服务端接收到客户端的 `FIN` 消息后，会进入 `CLOSE_WAIT` 状态并向客户端发送 `ACK` 消息，客户端接收到 `ACK` 消息时会进入 `FIN_WAIT_2` 状态；
 3. 当服务端没有待发送的数据时，服务端会向客户端发送 `FIN` 消息；
 4. 客户端接收到 `FIN` 消息后，会进入 `TIME_WAIT` 状态并向服务端发送 `ACK` 消息，服务端收到后会进入 `CLOSED` 状态；
 5. 客户端等待**两个最大数据段生命周期**（Maximum segment lifetime，MSL）(https://draveness.me/whys-the-design-tcp-time-wait/#fn:2)的时间后也会进入 `CLOSED` 状态；
+
+
+
+# 复位报文段
+
+TCP报文首部中存在一个RST位，如果该位被置1则表示这是个复位报文段。那么接收报文的一方不用继续进行交互。
+
+> A control bit (reset), occupying no sequence space, indicating that the receiver should delete the connection without further
+>interaction.  The receiver can determine, based on the  sequence number and acknowledgment fields of the incoming
+> segment, whether it should honor the reset command or ignore    it.  In no case does receipt of a segment containing RST give rise to a RST in response.       
+
+
 
 # 参考 
 TCP三次握手中SYN，ACK，Seq含义 https://blog.csdn.net/qq_25948717/article/details/80382766

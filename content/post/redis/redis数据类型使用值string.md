@@ -1,5 +1,5 @@
 ---
-title: "Redis字符串"
+title: "redis数据类型使用值string"
 date: 2020-10-10T17:09:21+08:00
 draft: false 
 categories: ["redis"]
@@ -19,20 +19,20 @@ redis 127.0.0.1:6379> COMMAND KEY_NAME
 
 | 命令                    | 描述                                                         |
 | ----------------------- | ------------------------------------------------------------ |
-| SET KEY VALUE           | 设置指定key的值                                              |
-| GET KEY                 | 获取指定 key 的值。                                          |
-| GETRANGE key start end  | 返回 key 中字符串值的子字符                                  |
-| GETSET key value        | 将给定 key 的值设为 value ，并返回 key 的旧值(old value)。   |
-| GETBIT key offset       | 对 key 所储存的字符串值，获取指定偏移量上的位(bit)。         |
-| MGET key1 key2          | 获取所有(一个或多个)给定 key 的值。                          |
-| SETBIT key offset value | 对 key 所储存的字符串值，设置或清除指定偏移量上的位(bit)。   |
-| SETEX key seconds value | 将值 value 关联到 key ，并将 key 的过期时间设为 seconds (以秒为单位)。 |
-| SETNX key value         | 只有在 key 不存在时设置 key 的值。                           |
-| APPEND key value        | 如果 key 已经存在并且是一个字符串， APPEND 命令将指定的 value 追加到该 key 原来值（value）的末尾。 |
-| INCR key                | 将 key 中储存的数字值增一。                                  |
-| INCR key increment      | 将 key 所储存的值加上给定的增量值（increment） 。            |
-| DECR key                | 将 key 中储存的数字值减一。                                  |
-| DECR key increment      | key 所储存的值减去给定的减量值（decrement） 。               |
+| set key value           | 设置指定key的值                                              |
+| get key                 | 获取指定 key 的值。                                          |
+| getrange key start end  | 返回 key 中字符串值的子字符                                  |
+| getset key value        | 将给定 key 的值设为 value ，并返回 key 的旧值(old value)。   |
+| getbit key offset       | 对 key 所储存的字符串值，获取指定偏移量上的位(bit)。         |
+| mget key1 key2          | 获取所有(一个或多个)给定 key 的值。                          |
+| Setbit key offset value | 对 key 所储存的字符串值，设置或清除指定偏移量上的位(bit)。   |
+| setex key seconds value | 将值 value 关联到 key ，并将 key 的过期时间设为 seconds (以秒为单位)。 |
+| setnx key value         | 只有在 key 不存在时设置 key 的值。                           |
+| append key value        | 如果 key 已经存在并且是一个字符串， APPEND 命令将指定的 value 追加到该 key 原来值（value）的末尾。 |
+| incr key                | 将 key 中储存的数字值增一。                                  |
+| incr key increment      | 将 key 所储存的值加上给定的增量值（increment） 。            |
+| decr key                | 将 key 中储存的数字值减一。                                  |
+| Decr key increment      | key 所储存的值减去给定的减量值（decrement） 。               |
 
 
 
