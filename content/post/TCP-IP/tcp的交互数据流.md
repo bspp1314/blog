@@ -1,8 +1,9 @@
 ---
 title: "tcp的交互数据流阅读笔记"
 date: 2020-11-06T13:51:08+08:00
+draft: true
 tags: ["tcp","网络"]   #[]前面要有空格
-draft: false
+categories: ["tcp/ip详解阅读笔记"]
 ---
 
 
