@@ -9,7 +9,6 @@
 rm -rf public/*  
 hugo -t even  
 cd public 
-git remote add origin https://github.com/bspp1314/bspp1314.github.io.git 
 git config --local user.name  "bspp1314"
 git config --local user.email "linyuanpeng1314@gmail.com"
 git add --all 
