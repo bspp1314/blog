@@ -1,7 +1,8 @@
 ---
 title: "Redis源码阅读之sds"
 date: 2020-11-06T17:50:42+08:00
-draft: false
+draft: true
+categories: ["redis"]
 ---
 
 ## 什么是sds
@@ -150,6 +151,144 @@ sds sdsnewlen(const void *init, size_t initlen) {
 ```
 
 
+
+sds 扩容
+
+```c
+/* Enlarge the free space at the end of the sds string so that the caller
+ * is sure that after calling this function can overwrite up to addlen
+ * bytes after the end of the string, plus one more byte for nul term.
+ *
+ * Note: this does not change the *length* of the sds string as returned
+ * by sdslen(), but only the free buffer space we have. */
+sds sdsMakeRoomFor(sds s, size_t addlen) {
+    void *sh, *newsh;
+    size_t avail = sdsavail(s);
+    size_t len, newlen;
+    char type, oldtype = s[-1] & SDS_TYPE_MASK;
+    int hdrlen;
+
+    /* Return ASAP if there is enough space left. */
+    if (avail >= addlen) return s;
+
+    len = sdslen(s);
+    sh = (char*)s-sdsHdrSize(oldtype);
+    newlen = (len+addlen);
+    // 计算需要扩容的大小，如果不超过1M，直接newlen * 2,如果超过1M newLen += 1M
+    if (newlen < SDS_MAX_PREALLOC)
+        newlen *= 2;
+    else
+        newlen += SDS_MAX_PREALLOC;
+
+    //计算扩容后的sds的类型
+    type = sdsReqType(newlen);
+
+    /* Don't use type 5: the user is appending to the string and type 5 is
+     * not able to remember empty space, so sdsMakeRoomFor() must be called
+     * at every appending operation. */
+    if (type == SDS_TYPE_5) type = SDS_TYPE_8;
+
+    hdrlen = sdsHdrSize(type);
+    if (oldtype==type) {
+        //扩容
+        newsh = s_realloc(sh, hdrlen+newlen+1);
+        if (newsh == NULL) {
+            s_free(sh);
+            return NULL;
+        }
+        s = (char*)newsh+hdrlen;
+    } else {
+        //重新分配
+        /* Since the header size changes, need to move the string forward,
+         * and can't use realloc */
+        newsh = s_malloc(hdrlen+newlen+1);
+        if (newsh == NULL) return NULL;
+        memcpy((char*)newsh+hdrlen, s, len+1);
+        s_free(sh);
+        s = (char*)newsh+hdrlen;
+        s[-1] = type;
+        sdssetlen(s, len);
+    }
+    sdssetalloc(s, newlen);
+    return s;
+}
+```
+
+库容的策略
+
+- 计算剩余容量
+  剩余容量等于`sh->alloc - sh->len` 如果剩余长度大于需要增加的长度，则直接返回
+- 计算扩容大小
+  新的空间和 `SDS_MAX_PREALLOC` 1024*1024进行比较
+  如果没超过1Mb ，则扩容空间大小为 该字符串长度的2倍 `2 * newlen`
+  如果超过1Mb，则增加1Mb大小。
+  所以字符串扩容最大只能更增加1Mb
+- 内存分配
+  `newLen` = 新增`addLen` + 原长度`len` 算出sds的类型
+  如果新类型=原类型，则进行调整内存大小 为`hdrlen+newlen+1`
+  如果新类型 不等于 原类型 内存进行重新分配，创建新的内存块 大小为`hdrlen+newlen+1`，释放旧的地址空间，将新的字符串写入新空间
+  设置字符串的容量`sdssetalloc`
+
+释放sds未使用的内存
+
+```c
+/* Reallocate the sds string so that it has no free space at the end. The
+ * contained string remains not altered, but next concatenation operations
+ * will require a reallocation.
+ *
+ * After the call, the passed sds string is no longer valid and all the
+ * references must be substituted with the new pointer returned by the call. */
+sds * Reallocate the sds string so that it has no free space at the end. The
+ * contained string remains not altered, but next concatenation operations
+ * will require a reallocation.
+ *
+ * After the call, the passed sds string is no longer valid and all the
+ * references must be substituted with the new pointer returned by the call. */
+sds sdsRemoveFreeSpace(sds s) {
+    void *sh, *newsh;
+  	// 获取sds的type,sds 指针指向 char 数组
+    char type, oldtype = s[-1] & SDS_TYPE_MASK;
+    int hdrlen, oldhdrlen = sdsHdrSize(oldtype);
+    size_t len = sdslen(s);
+    size_t avail = sdsavail(s);
+    sh = (char*)s-oldhdrlen;
+
+    /* Return ASAP if there is no space left. */
+  	//可用区域为0 
+    if (avail == 0) return s;
+
+    /* Check what would be the minimum SDS header that is just good enough to
+     * fit this string. */
+    type = sdsReqType(len);
+    hdrlen = sdsHdrSize(type);
+
+    /* If the type is the same, or at least a large enough type is still
+     * required, we just realloc(), letting the allocator to do the copy
+     * only if really needed. Otherwise if the change is huge, we manually
+     * reallocate the string to use the different header type. */
+ 
+   //如果类型一样，则调整sds的大小为len+hrdlen+1
+    if (oldtype==type || type > SDS_TYPE_8) {
+        newsh = s_realloc(sh, oldhdrlen+len+1);
+        if (newsh == NULL) return NULL;
+        s = (char*)newsh+oldhdrlen;
+    } else {
+        newsh = s_malloc(hdrlen+len+1);
+        if (newsh == NULL) return NULL;
+        memcpy((char*)newsh+hdrlen, s, len+1);
+        s_free(sh);
+        s = (char*)newsh+hdrlen;
+        s[-1] = type;
+        sdssetlen(s, len);
+    }
+    sdssetalloc(s, len);
+    return s;
+}
+```
+
+在上面的分配内存，我们看到，扩容的时候，会产生`newlen*2` 或者`newlen+1Mb` 大小的内存块，但是可能会产生大量的内存浪费，在内存紧张的情况，redis 会通过`sdsRemoveFreeSpace`释放掉这些内存。
+
+如果`sds` 实际大小 未超过 `sds` type的范围大小。则需要调整内存，否则进行创建新的内存区域，进行复制。
 
 # 参考 
 
