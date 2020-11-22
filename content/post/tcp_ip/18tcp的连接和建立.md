@@ -1,6 +1,6 @@
 ---
 
-title: "TCP-IP详情阅读笔记-18TCP的连接和建立阅读笔记"
+title: "18-tcp的连接和建立"
 date: 2020-10-31T20:44:08+08:00
 draft: false
 tags: ["tcp","网络"]   #[]前面要有空格
