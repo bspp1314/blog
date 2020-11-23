@@ -91,13 +91,66 @@ TCP 还有另外一种**快速重传（Fast Retransmit）机制**，它**不以�
 
 # SACK 
 
-SACK是一个TCP的选项，来允许TCP单独确认非连续的片段，用于告知真正丢失的包，只重传丢失的片段。要使用SACK，2个设备必须同时支持SACK才可以，建立连接的时候需要使用SACK Permitted的option，如果允许，后续的传输过程中TCP segment中的可以携带SACK option，这个option内容包含**一系列的非连续的没有确认的数据的seq range**，这些SYN包中SACK Permitted 选项，双方都支持才对。
+SACK是一个TCP的选项，来允许TCP单独确认非连续的片段，用于告知真正丢失的包，只重传丢失的片段。添加sack功能需要在TCP包
+头加两个选项，一个是开启选项（enabling option），另一个是sack选项（sack option）本身。开启sack选项后，receiver会将自己收到了哪些包，没收到哪些包的信息记录在sack段中告诉给sender，这样sender便可以一次性重传所有的丢包。
+
+
+
 
 
 
 ![image-20201122182705857](image-20201122182705857.png)
 
+## Enabling option 
 
+enabling option是一个占两字节的选项，在建立连接时通过SYN来告诉对方自己是否支持sack。
+
+```c
+       TCP Sack-Permitted Option:
+
+       Kind: 4
+
+       +---------+---------+
+       | Kind=4  | Length=2|
+       +---------+---------+
+```
+
+开启sack后，从receiver向sender发送的ack会在sack option字段中携带一些确认信息，
+而不是单纯的duplicate ack。
+
+```
+TCP SACK Option
+Kind: 5
+Length: Variable
+                          +-------------+-------------+
+                          | Kind = 5    |   Length    |
++------------+------------+-------------+-------------+
+|            Left Edge of list Block                  |
++------------+------------+-------------+-------------+
+|            Right Edge of list Block                 |
++------------+------------+-------------+-------------+
+|                                                     |
+/                      .  .  .                        /
+|                                                     |
++------------+------------+-------------+-------------+
+|            Left Edge of list Block                  |
++------------+------------+-------------+-------------+
+|            Right Edge of list Block                 |
++------------+------------+-------------+-------------+
+```
+
+```
+ A SACK option that specifies n blocks will have a length of 8*n+2
+   bytes, so the 40 bytes available for TCP options can specify a
+   maximum of 4 blocks.  It is expected that SACK will often be used in
+   conjunction with the Timestamp option used for RTTM [Jacobson92],
+   which takes an additional 10 bytes (plus two bytes of padding); thus
+   a maximum of 3 SACK blocks will be allowed in this case.
+```
+
+
+
+sack选项一般占40字节，其中kind占4字节，length占4字节，剩下32字节，每8字节为一个sack段，一个sack段用来记录一个连续block的开始序号和结束序号，所以最多只能记录4段连续的block。在实际情况中，经常会最多只有三段block，因为sack会经常与时间戳选项结合，用于测量RTT，这需要占用额外的8字节。
 
 
 
@@ -108,4 +161,8 @@ SACK是一个TCP的选项，来允许TCP单独确认非连续的片段，用于�
 30张图解： TCP 重传、滑动窗口、流量控制、拥塞控制   https://www.cnblogs.com/xiaolincoding/p/12732052.html
 
 TCP-IP详解：SACK选项（Selective Acknowledgment）https://blog.csdn.net/wdscq1234/article/details/52503315
+
+TCP Selective Acknowledgment Options https://tools.ietf.org/html/rfc2018
+
+TCP重点系列之sack介绍 https://allen-kevin.github.io/2017/03/01/TCP%E9%87%8D%E7%82%B9%E7%B3%BB%E5%88%97%E4%B9%8Bsack%E4%BB%8B%E7%BB%8D/
 
