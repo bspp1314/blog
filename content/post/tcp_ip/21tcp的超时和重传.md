@@ -154,6 +154,14 @@ sack选项一般占40字节，其中kind占4字节，length占4字节，剩下32
 
 
 
+# Duplicate SACK
+
+Duplicate SACK 又称 D-SACK，其主要使用了 SACK 来告诉「发送方」有哪些数据被重复接收了。
+
+- ACK 丢包
+
+
+
 
 
 # 参考
