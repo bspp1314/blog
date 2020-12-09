@@ -2,7 +2,7 @@
 
 title: "18-tcp的连接和建立"
 date: 2020-10-31T20:44:08+08:00
-draft: false
+draft: true
 tags: ["tcp","网络"]   #[]前面要有空格
 categories: ["tcp/ip详解阅读笔记"]
 ---

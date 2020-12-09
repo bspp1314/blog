@@ -1,7 +1,7 @@
 ---
 title: "20-tcp的成块数据流"
 date: 2020-11-15T13:51:08+08:00
-draft: false 
+draft: true
 tags: ["tcp","网络"]   #[]前面要有空格
 categories: ["tcp/ip详解阅读笔记"]
 ---
