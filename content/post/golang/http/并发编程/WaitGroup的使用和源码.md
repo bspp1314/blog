@@ -8,7 +8,7 @@ tags: ["并发","WaitContext"]
 
 # WaitGroup 用途
 
-[`sync.WaitGroup`](https://github.com/golang/go/blob/71239b4f491698397149868c88d2c851de2cd49b/src/sync/waitgroup.go#L20-L29) 它能够一直等到所有的goroutine执行完成，并且阻塞主线程的执行，直到所有的goroutine执行完成。
+[`sync.WaitGroup`](https://github.com/golang/go/blob/71239b4f491698397149868c88d2c851de2cd49b/src/sync/waitgroup.go#L20-L29) 它能够一直等到所有的goroutine执行完成，并且阻塞主线程的执行，直到所有的goroutine执行完成
 
 > A WaitGroup waits for a collection of goroutines to finish.The main goroutine calls Add to set the number of goroutines to wait for. Then each of the goroutines runs and calls Done when finished. At the same time,Wait can be used to block until all goroutines have finished.
 
@@ -16,7 +16,7 @@ tags: ["并发","WaitContext"]
 
 # WaitGroup 的简单使用
 
-比较常见的使用场景是批量发出 RPC 或者 HTTP 请求
+。一个比较常见的使用场景是批量发出 RPC 或者 HTTP 请求：
 
 ```go
 func main() {
@@ -71,7 +71,6 @@ type WaitGroup struct {
   
   
   
-
 - counter： 当前还未执行结束的goroutine计数器
 - waiter:  等待goroutine-group结束的goroutine数量，即有多少个等候者
 - semaphore: 信号量

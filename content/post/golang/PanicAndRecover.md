@@ -193,16 +193,20 @@ type _panic struct {
 
 
 
+Go编译器会将关键字 `panic` 转换成 [`runtime.gopanic`](https://draveness.me/golang/tree/runtime.gopanic)，该函数的执行过程包含以下几个步骤：
 
+- 创建新的 [`runtime._panic`](https://draveness.me/golang/tree/runtime._panic) 并添加到所在 Goroutine 的 `_panic` 链表的最前面；
+- 在循环中不断从当前 Goroutine 的 `_defer` 中链表获取 [`runtime._defer`](https://draveness.me/golang/tree/runtime._defer) 并调用 [`runtime.reflectcall`](https://draveness.me/golang/tree/runtime.reflectcall) 运行延迟调用函数；
+- 调用 [`runtime.fatalpanic`](https://draveness.me/golang/tree/runtime.fatalpanic) 中止整个程序；
 
 ```go
-/ The implementation of the predeclared function panic.
+// The implementation of the predeclared function panic.
 func gopanic(e interface{}) {
 	//获取当前的 Groutine 
   gp := getg()
 	......
 
-  //创建一个panic 
+  //创建新的 runtime._panic 并添加到所在 Goroutine 的 `_panic` 链表的最前面；
   //panic可以嵌套，比如发生了panic之后运行defered函数又发生了panic，
   //最新的panic会被挂入goroutine对应的g结构体对象的_panic链表的表头
 	var p _panic
@@ -212,8 +216,6 @@ func gopanic(e interface{}) {
 
 	atomic.Xadd(&runningPanicDefers, 1)
 
-	// By calculating getcallerpc/getcallersp here, we avoid scanning the
-	// gopanic frame (stack scanning is slow...)
   //增加一个开放地址编码的defer 
 	addOneOpenDeferFrame(gp, getcallerpc(), unsafe.Pointer(getcallersp()))
 
@@ -223,10 +225,7 @@ func gopanic(e interface{}) {
 		if d == nil {
 			break
 		}
-
-		// If defer was started by earlier panic or Goexit (and, since we're back here, that triggered a new panic),
-		// take defer off list. An earlier panic will not continue running, but we will make sure below that an
-		// earlier Goexit does continue running.
+    
     //到这里一定发生了panic嵌套，即在defered函数中又发生了panic
 		if d.started {
 			if d._panic != nil {
@@ -235,10 +234,6 @@ func gopanic(e interface{}) {
 			}
 			d._panic = nil
 			if !d.openDefer {
-				// For open-coded defers, we need to process the
-				// defer again, in case there are any other defers
-				// to call in the frame (not including the defer
-				// call that caused the panic).
 				d.fn = nil
 				gp._defer = d.link
 				freedefer(d)
@@ -246,9 +241,7 @@ func gopanic(e interface{}) {
 			}
 		}
 
-		// Mark defer as started, but keep on list, so that traceback
-		// can find and update the defer's argument frame if stack growth
-		// or a garbage collection happens before reflectcall starts executing d.fn.
+
 		d.started = true//用于判断是否发生了嵌套panic
 
 		// Record the panic that is running the defer.
@@ -362,6 +355,49 @@ func gopanic(e interface{}) {
 	*(*int)(nil) = 0      // not reached
 }
 
+// fatalpanic implements an unrecoverable panic. It is like fatalthrow, except
+// that if msgs != nil, fatalpanic also prints panic messages and decrements
+// runningPanicDefers once main is blocked from exiting.
+//
+//go:nosplit
+func fatalpanic(msgs *_panic) {
+	pc := getcallerpc()
+	sp := getcallersp()
+	gp := getg()
+	var docrash bool
+	// Switch to the system stack to avoid any stack growth, which
+	// may make things worse if the runtime is in a bad state.
+	systemstack(func() {
+		if startpanic_m() && msgs != nil {
+			// There were panic messages and startpanic_m
+			// says it's okay to try to print them.
+
+			// startpanic_m set panicking, which will
+			// block main from exiting, so now OK to
+			// decrement runningPanicDefers.
+			atomic.Xadd(&runningPanicDefers, -1)
+
+			printpanics(msgs)
+		}
+
+		docrash = dopanic_m(gp, pc, sp)
+	})
+
+	if docrash {
+		// By crashing outside the above systemstack call, debuggers
+		// will not be confused when generating a backtrace.
+		// Function crash is marked nosplit to avoid stack growth.
+		crash()
+	}
+
+	systemstack(func() {
+		exit(2)
+	})
+
+	*(*int)(nil) = 0 // not reached
+}
+
+
 ```
 
 
@@ -370,9 +406,54 @@ func gopanic(e interface{}) {
 
 
 
+# recover
+
+编译器会将关键字 `recover` 转换成 [`runtime.gorecover`](https://draveness.me/golang/tree/runtime.gorecover)
 
 
 
+```go
+// The implementation of the predeclared function recover.
+// Cannot split the stack because it needs to reliably
+// find the stack segment of its caller.
+//
+// TODO(rsc): Once we commit to CopyStackAlways,
+// this doesn't need to be nosplit.
+//go:nosplit
+func gorecover(argp uintptr) interface{} {
+	// Must be in a function running as part of a deferred call during the panic.
+	// Must be called from the topmost function of the call
+	// (the function used in the defer statement).
+	// p.argp is the argument pointer of that topmost deferred function call.
+// Compare against argp reported by caller.
+// If they match, the caller is the one who can recover.
+//p != nil：必须存在panic；
+// !p.goexit：非runtime.Goexit()；
+// !p.recovered：panic还未被恢复；
+argp == uintptr(p.argp)：recover()必须被defer()直接调用。
+	gp := getg()
+	p := gp._panic
+	if p != nil && !p.goexit && !p.recovered && argp == uintptr(p.argp) {
+		p.recovered = true
+		return p.arg
+	}
+	return nil
+}
+```
+
+
+
+关于recover 的一些分析
+
+ 
+
+- 为什么recover()一定要在defer()函数中才生效？
+
+如果recover()不在defer()函数中，那么recover()可能出现在panic()之前，也可能出现在panic()之后，出现在panic()之前，因为找不到panic实例而无法生效，出现在panic()之后，代码没有机会执行，所以recover()必须存在于defer函数中才会生效。
+
+- recover()必须被defer()直接调用
+
+  runtime.gorecover()函数的参数为调用recover()函数的参数地址，通常是defer函数的参数地址，同地_panic实例中也保存了当前defer函数的参数地址，如果二者一致，说明recover()被defer函数直接调用。
 
 
 
@@ -389,3 +470,7 @@ Golang: 深入理解panic and recover  https://ieevee.com/tech/2017/11/23/go-pan
 panic and recover 源码阅读  https://soyum2222.github.io/panic/
 
 Go语言panic/recover的实现 https://zhuanlan.zhihu.com/p/72779197
+
+5.4 panic 和 recover https://draveness.me/golang/docs/part2-foundation/ch05-keyword/golang-panic-recover/
+
+【Go专家编程】recover源码剖析 (https://my.oschina.net/renhc/blog/3217650)
