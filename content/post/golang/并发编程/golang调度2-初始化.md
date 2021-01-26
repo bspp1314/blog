@@ -14,7 +14,10 @@ import "fmt"
 func main() {
 	fmt.Println("Hello")
 }
+
 ```
+
+
 
 在项目根目录下执行：
 
@@ -285,6 +288,8 @@ TEXT runtime·asminit(SB),NOSPLIT,$0-0
 
 运行完这段代码之后,运行完上面这几行指令后g0与栈之间的关系如下图所示：
 
+![5B8285AE9C1B22712650A387A78849D0](../5B8285AE9C1B22712650A387A78849D0.png)
+
 
 
 主线程和m0的绑定
@@ -458,6 +463,10 @@ func schedinit() {
 }
 ```
 
+
+
+![image-20210124163757260](../image-20210124163757260.png)
+
 初始化 m0 
 
 ```go
@@ -517,7 +526,7 @@ func mcommoninit(mp *m, id int64) {
 
 
 
-
+创建 P
 
 ```go
 // Change number of processors. The world is stopped, sched is locked.
@@ -630,7 +639,7 @@ func procresize(nprocs int32) *p {
 }
 ```
 
-
+![image-20210124163815608](../image-20210124163815608.png)
 
 
 
