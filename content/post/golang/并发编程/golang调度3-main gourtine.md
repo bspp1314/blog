@@ -313,3 +313,4 @@ runqput 函数的就是把 g 加入到 P里面，这里有三种情况
 
 
 
+![go_schedule2](../go_schedule2.png)

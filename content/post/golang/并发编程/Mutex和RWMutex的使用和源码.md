@@ -75,31 +75,24 @@ const (
 
 ```
 
+互斥锁的状态比较多，如下图所示，最低三位分别表示 `mutexLocked`、`mutexWoken` 和 `mutexStarving`，剩下的位置用来表示当前有多少个 Goroutine 在等待互斥锁的释放
+
+![D4AF30CCCF4C477626153B98EF87C3DB](D4AF30CCCF4C477626153B98EF87C3DB.png)
+
+在默认情况下，互斥锁的所有状态位都是 0，`int32` 中的不同位分别表示了不同的状态：
+
+- `mutexLocked` — 表示互斥锁的锁定状态；
+- `mutexWoken` — 表示从正常模式被从唤醒；
+- `mutexStarving` — 当前的互斥锁进入饥饿状态；
+- `waitersCount` — 当前互斥锁上等待的 Goroutine 个数；
 
 
-sync.Mutex 的结构非常的简单，包含两个字段 state 和 sema。state 用来保存锁的各种状态，sema用来保存信号量。
-
-status 的各个位的含义如下
-
-```go
-state:   |32|31|...|4|3|2|1|
-         \__________/ | | |
-               |      | | |
-               |      | | 表示互斥锁的锁定状态
-               |      | |
-               |      |  表示从正常模式被从唤醒
-               |      |
-               |        表示是否处于饥饿模式
-               | 当前阻塞在mutex上的goroutine数
-```
-
-- 第一位（mutexLocked),表示互斥锁的锁定状态
-
-- 第二位 （mutexWoken),表示占用锁的groutine 是否被唤醒
-- 第三位  (mutexStarving),表示是否处于饥饿模式
-- 4~32 位 前互斥锁上等待的 Goroutine 个数
 
 
+
+# 源码
+
+Go Mutex 中有一段注释来解释为何需要饥饿模式 
 
 ```
 // Mutex fairness.
@@ -163,7 +156,7 @@ state:   |32|31|...|4|3|2|1|
 // If the lock is already in use, the calling goroutine
 // blocks until the mutex is available.
 func (m *Mutex) Lock() {
-   // Fast path: grab unlocked mutex.
+		// 锁的状态是 0 时，将 mutexLocked 位置成 1
    if atomic.CompareAndSwapInt32(&m.state, 0, mutexLocked) {
       if race.Enabled {
          race.Acquire(unsafe.Pointer(m))
@@ -174,6 +167,24 @@ func (m *Mutex) Lock() {
    m.lockSlow()
 }
 
+
+```
+
+如果互斥锁的状态不是 0 时就会调用 [`sync.Mutex.lockSlow`](https://draveness.me/golang/tree/sync.Mutex.lockSlow) 尝试通过自旋（Spinnig）等方式等待锁的释放，该方法的主体是一个非常大 for 循环，这里将它分成几个部分介绍获取锁的过程：
+
+1. 判断当前 Goroutine 能否进入自旋；
+
+2. 通过自旋等待互斥锁的释放；
+
+3. 计算互斥锁的最新状态；
+
+4. 更新互斥锁的状态并获取锁；
+
+
+
+## 判断当前的Gourtine 能否进入自旋
+
+```go
 func (m *Mutex) lockSlow() {
   //标记本goroutine的等待时间
 	var waitStartTime int64
@@ -186,8 +197,9 @@ func (m *Mutex) lockSlow() {
 	//获取当前锁的状态
 	old := m.state
 	for {
-    // old&(mutexLocked|mutexStarving) == mutexLocked 表示state已被锁，但是不是饥饿状态。如果时饥饿状态，自旋时没有用的，锁的拥有权直接交给了等待队列的第一个。
-    // runtime_canSpin(iter) 是还可以自旋，多核、压力不大并且在一定次数内可以自旋
+    // old&(mutexLocked|mutexStarving) == mutexLocked  表示 
+    // old mutexLocked = 1
+    // old mutexStarving = 0 
 		if old&(mutexLocked|mutexStarving) == mutexLocked && runtime_canSpin(iter) {
 			// Active spinning makes sense.
 			// Try to set mutexWoken flag to inform Unlock
@@ -204,140 +216,91 @@ func (m *Mutex) lockSlow() {
 			continue
 		}
     
+```
 
-     // 1. 锁还没有被释放，锁处于正常状态
-     // 2. 锁还没有被释放， 锁处于饥饿状态
-     // 3. 锁已经被释放， 锁处于正常状态
-     // 4. 锁已经被释放， 锁处于饥饿状态
-    
-    // new 复制 state的当前状态， 用来设置新的状态
+自旋是一种多线程同步机制，当前的进程在进入自旋的过程中会一直保持 CPU 的占用，持续检查某个条件是否为真，耗费较多的资源。所以 Goroutine 进入自旋的条件非常苛刻。
+
+- 运行在多 CPU 的机器上；
+- 当前 Goroutine 为了获取该锁进入自旋的次数小于四次；
+- 至少存在一个P 且 local q 队列中的g是空
+
+runtime_canSpin 最终会被指向runtime 中的 [`runtime.sync_runtime_canSpin`](https://draveness.me/golang/tree/runtime.sync_runtime_canSpin) ,runtime_doSpin最终会指向[`runtime.sync_runtime_doSpin`](https://draveness.me/golang/tree/runtime.sync_runtime_doSpin)
+
+```go
+// Active spinning for sync.Mutex.
+//go:linkname sync_runtime_canSpin sync.runtime_canSpin
+//go:nosplit
+func sync_runtime_canSpin(i int) bool {
+	// sync.Mutex is cooperative, so we are conservative with spinning.
+	// Spin only few times and only if running on a multicore machine and
+	// GOMAXPROCS>1 and there is at least one other running P and local runq is empty.
+	// As opposed to runtime mutex we don't do passive spinning here,
+	// because there can be work on global runq or on other Ps.
+  // 运行在多 CPU 的机器上；
+  // 当前 Goroutine 为了获取该锁进入自旋的次数小于四次；
+  // 至少存在一个P 且 local q 队列中的g是空
+	if i >= active_spin || ncpu <= 1 || gomaxprocs <= int32(sched.npidle+sched.nmspinning)+1 {
+		return false
+	}
+	if p := getg().m.p.ptr(); !runqempty(p) {
+		return false
+	}
+	return true
+}
+
+func sync_runtime_doSpin() 
+	procyield(active_spin_cnt) // active_spin_cnt = 30 
+}
+
+TEXT runtime·procyield(SB),NOSPLIT,$0-0
+	MOVL	cycles+0(FP), AX  // AX = 30 
+again:
+	PAUSE   //PAUSE指令。PAUSE指令什么都不做，但是会消耗CPU时间，在执行PAUSE指令时， CPU不会对他做不必要的优化。
+	SUBL	$1, AX  //
+	JNZ	again
+	RET
+```
+
+
+
+处理了自旋相关的特殊逻辑之后，互斥锁会根据上下文计算当前互斥锁最新的状态。几个不同的条件分别会更新 `state` 字段中存储的不同信息 — `mutexLocked`、`mutexStarving`、`mutexWoken` 和 `mutexWaiterShift`：
+
+```go
 		new := old
-		// Don't try to acquire starving mutex, new arriving goroutines must queue.
-	  // 如果old state状态不是饥饿状态, new state 设置锁， 尝试通过CAS获取锁,
-    //如果old state状态是饥饿状态, 则不设置new state的锁，因为饥饿状态下锁直接转给等待队列的第一个.
+		//如果old state状态不是饥饿状态, new state 设置锁， 尝试通过CAS获取锁,
 		if old&mutexStarving == 0 {
 			new |= mutexLocked
 		}
-
-   // 锁属于锁定状态或者饥饿状，将等待队列的等待者的数量加1
-    if old&(mutexLocked|mutexStarving) != 0 {
+	
+		// 锁属于锁定状态或者饥饿状，将等待队列的等待者的数量加1
+		if old&(mutexLocked|mutexStarving) != 0 {
 			new += 1 << mutexWaiterShift
 		}
-		// The current goroutine switches mutex to starvation mode.
-		// But if the mutex is currently unlocked, don't do the switch.
-		// Unlock expects that starving mutex has waiters, which will not
-		// be true in this case.
-        // 如果当前goroutine已经处于饥饿状态， 并且old state的已被加锁,
-        // 将new state的状态标记为饥饿状态, 将锁转变为饥饿状态.
+		
+		// 如果当前goroutine已经处于饥饿状态， 并且old state的已被加锁,
+    // 将new state的状态标记为饥饿状态, 将锁转变为饥饿状态.
 		if starving && old&mutexLocked != 0 {
 			new |= mutexStarving
 		}
-    
-     // 如果本goroutine已经设置为唤醒状态, 需要清除new state的唤醒标记, 因为本goroutine要么获得了锁，要么进入休眠，
-     // 总之state的新状态不再是woken状态.
-		if awoke {
+	// 如果本goroutine已经设置为唤醒状态, 需要清除new state的唤醒标记, 因为本goroutine要么获得了锁，要么进入休眠，
+  // 总之state的新状态不再是woken状态.
+	if awoke {
 			// The goroutine has been woken from sleep,
 			// so we need to reset the flag in either case.
 			if new&mutexWoken == 0 {
 				throw("sync: inconsistent mutex state")
 			}
 			new &^= mutexWoken
-		}
-    
-		if atomic.CompareAndSwapInt32(&m.state, old, new) {
-			if old&(mutexLocked|mutexStarving) == 0 {
-				break // locked the mutex with CAS
-			}
-			// If we were already waiting before, queue at the front of the queue.
-       // 设置/计算本goroutine的等待时间
-			queueLifo := waitStartTime != 0
-			if waitStartTime == 0 {
-				waitStartTime = runtime_nanotime()
-			}
-      // 既然未能获取到锁， 那么就使用sleep原语阻塞本goroutine
-      // 如果是新来的goroutine,queueLifo=false, 加入到等待队列的尾部，耐心等待
-      // 如果是唤醒的goroutine, queueLifo=true, 加入到等待队列的头部
-			runtime_SemacquireMutex(&m.sema, queueLifo, 1)
-			starving = starving || runtime_nanotime()-waitStartTime > starvationThresholdNs
-			old = m.state
-			if old&mutexStarving != 0 {
-				// If this goroutine was woken and mutex is in starvation mode,
-				// ownership was handed off to us but mutex is in somewhat
-				// inconsistent state: mutexLocked is not set and we are still
-				// accounted as waiter. Fix that.
-				if old&(mutexLocked|mutexWoken) != 0 || old>>mutexWaiterShift == 0 {
-					throw("sync: inconsistent mutex state")
-				}
-				delta := int32(mutexLocked - 1<<mutexWaiterShift)
-				if !starving || old>>mutexWaiterShift == 1 {
-					// Exit starvation mode.
-					// Critical to do it here and consider wait time.
-					// Starvation mode is so inefficient, that two goroutines
-					// can go lock-step infinitely once they switch mutex
-					// to starvation mode.
-					delta -= mutexStarving
-				}
-				atomic.AddInt32(&m.state, delta)
-				break
-			}
-			awoke = true
-			iter = 0
-		} else {
-			old = m.state
-		}
 	}
 
-	if race.Enabled {
-		race.Acquire(unsafe.Pointer(m))
-	}
-}
-```
-
-如果互斥锁的状态不是 0 时就会调用 [`sync.Mutex.lockSlow`](https://draveness.me/golang/tree/sync.Mutex.lockSlow) 尝试通过自旋（Spinnig）等方式等待锁的释放，该方法的主体是一个非常大 for 循环，这里将它分成几个部分介绍获取锁的过程：
-
-1. 判断当前 Goroutine 能否进入自旋
-2. 通过自旋等待互斥锁的释放
-3. 计算互斥锁的最新状态
-4. 更新互斥锁的状态并获取锁
-
-
-
-## 是否可以进入自旋锁
-
-```go
- func (m *Mutex) lockSlow() {
-	var waitStartTime int64
-	starving := false
-	awoke := false
-	iter := 0
-	//获取当前锁的状态
-	old := m.state
-	for {
-		// Don't spin in starvation mode, ownership is handed off to waiters
-		// so we won't be able to acquire the mutex anyway.
-		if old&(mutexLocked|mutexStarving) == mutexLocked && runtime_canSpin(iter) {
-			// Active spinning makes sense.
-			// Try to set mutexWoken flag to inform Unlock
-			// to not wake other blocked goroutines.
-			if !awoke && old&mutexWoken == 0 && old>>mutexWaiterShift != 0 &&
-				atomic.CompareAndSwapInt32(&m.state, old, old|mutexWoken) {
-				awoke = true
-			}
-			runtime_doSpin()
-			iter++
-			old = m.state
-			continue
-		}
-		.......
-}
 
 ```
 
-是否可以进入自旋锁有以下几个条件
 
-- 互斥锁只有在普通模式才能进入自旋
-- [`runtime.sync_runtime_canSpin`](https://draveness.me/golang/tree/runtime.sync_runtime_canSpin) 需要返回 `true`
-  	1. 运行在多CPU机器上
+
+
+
+- 
    	2. 当前groutine 为了获取该锁进入自旋的次数小于四次
    	3. 当前机器上至少存在一个正在运行的处理器 P 并且处理的运行队列为空
 
@@ -371,24 +334,33 @@ func (m *Mutex) lockSlow() {
 
 ```
 
+
+
 计算了新的互斥锁状态之后，会使用 CAS 函数 [`sync/atomic.CompareAndSwapInt32`](https://draveness.me/golang/tree/sync/atomic.CompareAndSwapInt32) 更新状态：
+
+
 
 ```go
 if atomic.CompareAndSwapInt32(&m.state, old, new) {
-			if old&(mutexLocked|mutexStarving) == 0 {
+  		// old state 没有被改写，且old为非锁或饥饿状态，说明通过cas 获取到了锁
+			if old&(mutexLocked|mutexStarving) == 0 { 
 				break // locked the mutex with CAS
 			}
 			// If we were already waiting before, queue at the front of the queue.
-       // 设置/计算本goroutine的等待时间
+  	
 			queueLifo := waitStartTime != 0
+  		// 等待锁的时间
 			if waitStartTime == 0 {
 				waitStartTime = runtime_nanotime()
 			}
-      //互斥锁在正常情况下会通过 runtime.sync_runtime_SemacquireMutex 将尝试获取锁的 Goroutine 切换至休眠状态，等待锁的持有者唤醒；
+  		//过信号量保证资源不会被两个 Goroutine 获取。runtime.sync_runtime_SemacquireMutex 
+			//会在方法中不断尝试获取锁并陷入休眠等待信号量的释放，一旦当前 Goroutine 可以获取信号量，它就会立刻返回，说明当前的locked 0 
 			runtime_SemacquireMutex(&m.sema, queueLifo, 1)
-     //计算当前goroutine是否已经处于饥饿状态,等待时间超过1ns
 			starving = starving || runtime_nanotime()-waitStartTime > starvationThresholdNs
 			old = m.state
+      
+  		
+  		//处于饥饿状态，在饥饿模式下，当前 Goroutine 会获得互斥锁
 			if old&mutexStarving != 0 {
 				// If this goroutine was woken and mutex is in starvation mode,
 				// ownership was handed off to us but mutex is in somewhat
@@ -411,30 +383,63 @@ if atomic.CompareAndSwapInt32(&m.state, old, new) {
 			}
 			awoke = true
 			iter = 0
+		} else {
+			old = m.state
+		}
 ```
 
 
 
+# UnLock
+
+```go
+func (m *Mutex) Unlock() {
+	new := atomic.AddInt32(&m.state, -mutexLocked)
+	if new != 0 {
+		m.unlockSlow(new)
+	}
+}
+
+func (m *Mutex) unlockSlow(new int32) {
+	if (new+mutexLocked)&mutexLocked == 0 {
+		throw("sync: unlock of unlocked mutex")
+	}
+	if new&mutexStarving == 0 { //正常模式
+		old := new
+		for {
+			// If there are no waiters or a goroutine has already
+			// been woken or grabbed the lock, no need to wake anyone.
+			// In starvation mode ownership is directly handed off from unlocking
+			// goroutine to the next waiter. We are not part of this chain,
+			// since we did not observe mutexStarving when we unlocked the mutex above.
+			// So get off the way.
+      // 互斥锁不存在等待者
+      // `mutexLocked`、`mutexStarving`、`mutexWoken` 状态不都为 0，
+			if old>>mutexWaiterShift == 0 || old&(mutexLocked|mutexWoken|mutexStarving) != 0 {
+				return
+			}
+			// Grab the right to wake someone.
+     //  如果互斥锁存在等待者，会通过 [`sync.runtime_Semrelease`](https://draveness.me/golang/tree/sync.runtime_Semrelease) 唤醒等待者并移交锁的所有权；
+			new = (old - 1<<mutexWaiterShift) | mutexWoken
+			if atomic.CompareAndSwapInt32(&m.state, old, new) {
+				runtime_Semrelease(&m.sema, false, 1)
+				return
+			}
+			old = m.state
+		}
+	} else { //饥饿模式
+		// Starving mode: handoff mutex ownership to the next waiter, and yield
+		// our time slice so that the next waiter can start to run immediately.
+		// Note: mutexLocked is not set, the waiter will set it after wakeup.
+		// But mutex is still considered locked if mutexStarving is set,
+		// so new coming goroutines won't acquire it.
+		runtime_Semrelease(&m.sema, true, 1)//当前锁交给下一个正在尝试获取锁的等待者，等待者被唤醒后会得到锁，在这时互斥锁还不会退出饥饿状态；
+
+==
+	}
+}
+
+```
 
 
-互斥锁加锁的流程
 
-- 如果互斥锁处于初始化状态，会通过置位 `mutexLocked` 加锁；
-- 如果互斥锁处于 `mutexLocked` 状态并且在普通模式下工作，会进入自旋，执行 30 次 `PAUSE` 指令消耗 CPU 时间等待锁的释放；
-- 如果当前 Goroutine 等待锁的时间超过了 1ms，互斥锁就会切换到饥饿模式；
-- 互斥锁在正常情况下会通过 [`runtime.sync_runtime_SemacquireMutex`](https://draveness.me/golang/tree/runtime.sync_runtime_SemacquireMutex) 将尝试获取锁的 Goroutine 切换至休眠状态，等待锁的持有者唤醒；
-- 如果当前 Goroutine 是互斥锁上的最后一个等待的协程或者等待的时间小于 1ms，那么它会将互斥锁切换回正常模式；
-
-
-
-# Unlock 
-
-
-
-# 参考
-
-sync.mutex 源代码分析  https://colobu.com/2018/12/18/dive-into-sync-mutex/
-
-Linux中的各种锁 https://www.jianshu.com/p/b9530c42e07a
-
-6.2 同步原语与锁 https://draveness.me/golang/docs/part3-runtime/ch06-concurrency/golang-sync-primitives/#mutex

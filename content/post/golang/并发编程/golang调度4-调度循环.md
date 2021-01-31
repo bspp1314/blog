@@ -337,3 +337,9 @@ TEXT runtime·gogo(SB), NOSPLIT, $16-8
 
  ```
 
+现在已经从g0切换到了gp这个goroutine，对于我们这个场景来说，gp还是第一次被调度起来运行，它的入口函数是runtime.main.
+
+
+
+
+
