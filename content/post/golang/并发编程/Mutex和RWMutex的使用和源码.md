@@ -49,7 +49,7 @@ func main() {
 
 ```
 
-#sync.Mutex 的结构
+## sync.Mutex 的结构
 
 sync.Mutex 由两个字段state 和 sema 组成。`state` 表示当前互斥锁的状态，而 `sema` 是用于控制锁状态的信号量。
 
@@ -90,7 +90,7 @@ const (
 
 
 
-# 源码
+## 源码
 
 Go Mutex 中有一段注释来解释为何需要饥饿模式 
 
@@ -149,7 +149,7 @@ Go Mutex 中有一段注释来解释为何需要饥饿模式
 
 
 
-#  Lock
+##  Lock
 
 ```go
 // Lock locks m.
@@ -390,7 +390,7 @@ if atomic.CompareAndSwapInt32(&m.state, old, new) {
 
 
 
-# UnLock
+## UnLock
 
 ```go
 func (m *Mutex) Unlock() {
@@ -434,12 +434,129 @@ func (m *Mutex) unlockSlow(new int32) {
 		// But mutex is still considered locked if mutexStarving is set,
 		// so new coming goroutines won't acquire it.
 		runtime_Semrelease(&m.sema, true, 1)//当前锁交给下一个正在尝试获取锁的等待者，等待者被唤醒后会得到锁，在这时互斥锁还不会退出饥饿状态；
-
-==
 	}
 }
 
 ```
 
 
+
+# RWMutex
+
+读写互斥锁 [`sync.RWMutex`](https://draveness.me/golang/tree/sync.RWMutex) 是细粒度的互斥锁，它不限制资源的并发读，但是读写、写写操作无法并行执行。
+
+其数据结构如下
+
+```go
+type RWMutex struct {
+	w           Mutex  // held if there are pending writers
+	writerSem   uint32 // semaphore for writers to wait for completing readers
+	readerSem   uint32 // semaphore for readers to wait for completing writers
+	readerCount int32  // number of pending readers //正在处理的读锁的数量
+	readerWait  int32  // number of departing readers //表示当写操作被阻塞时等待的读操作个数
+}
+```
+
+
+## Lock
+
+当资源的使用者想要获取写锁时，需要调用 Lock()
+```go
+// Lock locks rw for writing.
+// If the lock is already locked for reading or writing,
+// Lock blocks until the lock is available.
+func (rw *RWMutex) Lock() {
+	if race.Enabled {
+		_ = rw.w.state
+		race.Disable()
+	}
+	// First, resolve competition with other writers.
+	rw.w.Lock()
+	// Announce to readers there is a pending writer.
+  // 调用 sync/atomic.AddInt32 函数阻塞后续的读操作：
+	r := atomic.AddInt32(&rw.readerCount, -rwmutexMaxReaders) + rwmutexMaxReaders
+	// Wait for active readers.
+	if r != 0 && atomic.AddInt32(&rw.readerWait, r) != 0 {
+    //如果仍然有其他 Goroutine 持有互斥锁的读锁，该 Goroutine 会调用 runtime.sync_runtime_SemacquireMutex 进入休眠状态等待所有读锁所有者执行结束后释放 writerSem 信号量将当前协程唤醒；
+		runtime_SemacquireMutex(&rw.writerSem, false, 0)
+	}
+	if race.Enabled {
+		race.Enable()
+		race.Acquire(unsafe.Pointer(&rw.readerSem))
+		race.Acquire(unsafe.Pointer(&rw.writerSem))
+	}
+}
+
+```
+
+UnLock
+
+```go
+func (rw *RWMutex) Unlock() {
+  //调用 sync/atomic.AddInt32 函数将 readerCount 变回正数，释放读锁；
+	r := atomic.AddInt32(&rw.readerCount, rwmutexMaxReaders)
+	if r >= rwmutexMaxReaders {
+		throw("sync: Unlock of unlocked RWMutex")
+	}
+	for i := 0; i < int(r); i++ {
+    //通过 for 循环释放所有因为获取读锁而陷入等待的 Goroutine：
+		runtime_Semrelease(&rw.readerSem, false, 0)
+	}
+  //调用 sync.Mutex.Unlock 释放写锁；
+	rw.w.Unlock()
+}
+```
+
+
+
+## RLock
+
+```go
+func (rw *RWMutex) RLock() {
+	if race.Enabled {
+		_ = rw.w.state
+		race.Disable()
+	}
+  //atomic.AddInt32 返回负数，说明其他 Goroutine 获得了写锁，当前 Goroutine 就会调用 runtime.sync_runtime_SemacquireMutex 陷入休眠等待锁的释放
+	if atomic.AddInt32(&rw.readerCount, 1) < 0 {
+		// A writer is pending, wait for it.
+		runtime_SemacquireMutex(&rw.readerSem, false, 0)
+	}
+	if race.Enabled {
+		race.Enable()
+		race.Acquire(unsafe.Pointer(&rw.readerSem))
+	}
+ //如果该方法的结果为非负数 — 没有 Goroutine 获得写锁，当前方法会成功返回
+}
+
+```
+
+当 Goroutine 想要释放读锁时，会调用如下所示的 [`sync.RWMutex.RUnlock`](https://draveness.me/golang/tree/sync.RWMutex.RUnlock) 方法：
+
+```go
+func (rw *RWMutex) RUnlock() {
+	if r := atomic.AddInt32(&rw.readerCount, -1); r < 0 {
+		rw.rUnlockSlow(r)
+	}
+}
+
+func (rw *RWMutex) rUnlockSlow(r int32) {
+	if r+1 == 0 || r+1 == -rwmutexMaxReaders {
+		throw("sync: RUnlock of unlocked RWMutex")
+	}
+  //有一个正在执行的写操,s
+	if atomic.AddInt32(&rw.readerWait, -1) == 0 {
+		runtime_Semrelease(&rw.writerSem, false, 1)
+	}
+```
+
+
+
+
+
+
+
+# 方法：参考
+
+golang 读写锁由浅入深 https://www.techclone.cn/post/tech/go/go-rwlock/
 
