@@ -145,7 +145,8 @@ func (srv *Server) ListenAndServe() error {
 	if addr == "" {
 		addr = ":http"
 	}
-	ln, err := net.Listen("tcp", addr) //注意这个函数，这个函数就是用来启动tcp服务的。
+  //监听tcp 
+	ln, err := net.Listen("tcp", addr) 
 	if err != nil {
 		return err
 	}
@@ -161,7 +162,8 @@ func (srv *Server) Serve(l net.Listener) error {
 
 	ctx := context.WithValue(baseCtx, ServerContextKey, srv)
 	for {
-		rw, err := l.Accept() //注意这个函数，开始等待tcp请求
+    //等待tcp清楚的到来
+		rw, err := l.Accept() 
 		if err != nil {
 			select {
 			case <-srv.getDoneChan():

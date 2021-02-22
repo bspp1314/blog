@@ -172,6 +172,8 @@ func park_m(gp *g) {
 
 ```
 
+
+
 ##  唤醒阻塞在channel上的goroutine
 
 ```go
@@ -270,12 +272,117 @@ func ready(gp *g, traceskip int, next bool) {
 	casgstatus(gp, _Gwaiting, _Grunnable)
 	//然后把其放入运行队列之中等待调度器的调度。
   runqput(_g_.m.p.ptr(), gp, next)
+  //有空闲的p而且没有正在偷取goroutine的工作线程，则需要唤醒p出来工作
 	wakep()
 	releasem(mp)
 }
 ```
 
 执行到这里main goroutine已经被放入了运行队列，但还未被调度起来运行，而g2 goroutine在向channel写完数据之后就从这里的ready函数返回并退出了.g2的退出过程中将会在goexit0函数中调用schedule函数进入下一轮调度，从而把刚刚放入运行队列的main goroutine调度起来运行。
+
+
+
+# 唤醒空闲的P
+
+```go
+// Tries to add one more P to execute G's.
+// Called when a G is made runnable (newproc, ready).
+func wakep() {
+  //查看空闲的 p  是否为0 
+	if atomic.Load(&sched.npidle) == 0 {
+		return
+	}
+	// be conservative about spinning threads
+  // atomic.Load(&sched.nmspinning) 如果已经有工作线程进入了spinning状态而在四处寻找需要运行的goroutine 
+  if atomic.Load(&sched.nmspinning) != 0 || !atomic.Cas(&sched.nmspinning, 0, 1) {
+		return
+	}
+  //唤醒M
+	startm(nil, true)
+}
+
+```
+
+
+
+
+
+```go
+// Schedules some M to run the p (creates an M if necessary).
+// If p==nil, tries to get an idle P, if no idle P's does nothing.
+// May run with m.p==nil, so write barriers are not allowed.
+// If spinning is set, the caller has incremented nmspinning and startm will
+// either decrement nmspinning or set m.spinning in the newly started M.
+//go:nowritebarrierrec
+func startm(_p_ *p, spinning bool) {
+	lock(&sched.lock)
+  //没有指定p的话需要从p的空闲队列中获取一个p
+	if _p_ == nil {
+		_p_ = pidleget() //从p的空闲队列中获取空闲p
+		if _p_ == nil {
+			unlock(&sched.lock)
+			if spinning {
+				// The caller incremented nmspinning, but there are no idle Ps,
+				// so it's okay to just undo the increment and give up.
+				if int32(atomic.Xadd(&sched.nmspinning, -1)) < 0 {
+					throw("startm: negative nmspinning")
+				}
+			}
+			return //没有空闲的p，直接返回
+		}
+	}
+  //从m空闲队列中获取正处于睡眠之中的工作线程，所有处于睡眠状态的m都在此队列中
+	mp := mget()
+	if mp == nil {
+		// No M is available, we must drop sched.lock and call newm.
+		// However, we already own a P to assign to the M.
+		//
+		// Once sched.lock is released, another G (e.g., in a syscall),
+		// could find no idle P while checkdead finds a runnable G but
+		// no running M's because this new M hasn't started yet, thus
+		// throwing in an apparent deadlock.
+		//
+		// Avoid this situation by pre-allocating the ID for the new M,
+		// thus marking it as 'running' before we drop sched.lock. This
+		// new M will eventually run the scheduler to execute any
+		// queued G's.
+		id := mReserveID()
+		unlock(&sched.lock)
+
+		var fn func()
+		if spinning {
+			// The caller incremented nmspinning, so set m.spinning in the new M.
+			fn = mspinning
+		}
+    //创建M
+		newm(fn, _p_, id)
+		return
+	}
+	unlock(&sched.lock)
+	if mp.spinning {
+		throw("startm: m is spinning")
+	}
+	if mp.nextp != 0 {
+		throw("startm: m has p")
+	}
+	if spinning && !runqempty(_p_) {
+		throw("startm: p has runnable gs")
+	}
+	// The caller incremented nmspinning, so set m.spinning in the new M.
+	mp.spinning = spinning
+	//设置P
+  mp.nextp.set(_p_)
+  //唤醒M
+	notewakeup(&mp.park)
+}
+
+```
+
+
+
+
+
+
 
 
 
