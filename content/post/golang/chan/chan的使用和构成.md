@@ -728,3 +728,684 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
     
 ```
 
+如果当前 `channel` 的缓冲区未满时，向 `channel` 发送数据时就会直接存储在 `channel` 中 `sendx` 索引所在的位置并将 sendx 索引加一，如果`c.sendx` 等于 `c.dataqsiz` 那么就将 `c.sendx` 设置为0 ，这是因为  缓冲区是一个队列，先进入缓冲区的数据会被取走。
+
+![image-20210318234754785](image-20210318234754785.png)
+
+
+
+
+
+## 阻塞发送
+
+最后要介绍的就是向 Channel 发送但是遇到下游无法处理的『阻塞发送』了，当然如果传入的参数 block=false，那么就会直接释放持有的锁并返回 false 表示这一次的发送不成功。
+
+在常见的场景中，向 Channel 发送消息的操作基本上都是阻塞的，在这时就会执行下面的代码，我们可以简单梳理一下这段代码的逻辑：
+
+```go
+func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
+  .....
+// Block on the channel. Some receiver will complete our operation for us.
+  // 获取当前 g 
+	gp := getg()
+	mysg := acquireSudog()
+	mysg.releasetime = 0
+	if t0 != 0 {
+		mysg.releasetime = -1
+	}
+	// No stack splits between assigning elem and enqueuing mysg
+	// on gp.waiting where copystack can find it.
+	mysg.elem = ep
+	mysg.waitlink = nil
+	mysg.g = gp
+	mysg.isSelect = false
+	mysg.c = c
+	gp.waiting = mysg
+	gp.param = nil
+	c.sendq.enqueue(mysg)
+	gopark(chanparkcommit, unsafe.Pointer(&c.lock), waitReasonChanSend, traceEvGoBlockSend, 2)
+	// Ensure the value being sent is kept alive until the
+	// receiver copies it out. The sudog has a pointer to the
+	// stack object, but sudogs aren't considered as roots of the
+	// stack tracer.
+	KeepAlive(ep)
+
+	// someone woke us up.
+	if mysg != gp.waiting {
+		throw("G waiting list is corrupted")
+	}
+	gp.waiting = nil
+	gp.activeStackChans = false
+	if gp.param == nil {
+		if c.closed == 0 {
+			throw("chansend: spurious wakeup")
+		}
+		panic(plainError("send on closed channel"))
+	}
+	gp.param = nil
+	if mysg.releasetime > 0 {
+		blockevent(mysg.releasetime-t0, 2)
+	}
+	mysg.c = nil
+	releaseSudog(mysg)
+	return true
+```
+
+1. 调用 getg 获取发送操作时使用的 g 协程；
+2. 执行 acquireSudog 函数从cache 获取一个 sudog 并设置这一次阻塞发送的相关信息，例如发送的 channel、是否在 select 控制结构中、发送数据所在的地址等；
+3. 将刚刚创建并初始化的 sudog 结构体加入 sendq 等待队列，并设置到当前 goroutine 的 waiting 上，表示 goroutine 正在等待该 sudog 准备就绪；
+4. 调用 goparkunlock 函数将当前的 Goroutine 更新成 Gwaiting 状态并解锁，该 Goroutine 可以被调用 goready 再次唤醒；
+5. 当前的 Goroutine 其实就会在这里陷入阻塞状态等待被调度器唤醒了；
+6. 如果被调度器唤醒就会执行一些收尾的工作，将一些属性置零并且释放 sudog 结构体；
+
+在最后，函数会返回 true 表示这一次发送的结束并继续运行当前 Goroutine 应该执行的逻辑。
+
+
+
+
+
+# 接收
+
+接收的过程逻辑下基本一致，这里就直接放代码，不继续分析了
+
+```go
+// chanrecv receives on channel c and writes the received data to ep.
+// ep may be nil, in which case received data is ignored.
+// If block == false and no elements are available, returns (false, false).
+// Otherwise, if c is closed, zeros *ep and returns (true, false).
+// Otherwise, fills in *ep with an element and returns (true, true).
+// A non-nil ep must point to the heap or the caller's stack.
+func chanrecv(c *hchan, ep unsafe.Pointer, block bool) (selected, received bool) {
+	// raceenabled: don't need to check ep, as it is always on the stack
+	// or is new memory allocated by reflect.
+
+	if debugChan {
+		print("chanrecv: chan=", c, "\n")
+	}
+
+	if c == nil {
+		if !block {
+			return
+		}
+		gopark(nil, nil, waitReasonChanReceiveNilChan, traceEvGoStop, 2)
+		throw("unreachable")
+	}
+
+	// Fast path: check for failed non-blocking operation without acquiring the lock.
+	if !block && empty(c) {
+		// After observing that the channel is not ready for receiving, we observe whether the
+		// channel is closed.
+		//
+		// Reordering of these checks could lead to incorrect behavior when racing with a close.
+		// For example, if the channel was open and not empty, was closed, and then drained,
+		// reordered reads could incorrectly indicate "open and empty". To prevent reordering,
+		// we use atomic loads for both checks, and rely on emptying and closing to happen in
+		// separate critical sections under the same lock.  This assumption fails when closing
+		// an unbuffered channel with a blocked send, but that is an error condition anyway.
+		if atomic.Load(&c.closed) == 0 {
+			// Because a channel cannot be reopened, the later observation of the channel
+			// being not closed implies that it was also not closed at the moment of the
+			// first observation. We behave as if we observed the channel at that moment
+			// and report that the receive cannot proceed.
+			return
+		}
+		// The channel is irreversibly closed. Re-check whether the channel has any pending data
+		// to receive, which could have arrived between the empty and closed checks above.
+		// Sequential consistency is also required here, when racing with such a send.
+		if empty(c) {
+			// The channel is irreversibly closed and empty.
+			if raceenabled {
+				raceacquire(c.raceaddr())
+			}
+			if ep != nil {
+				typedmemclr(c.elemtype, ep)
+			}
+			return true, false
+		}
+	}
+
+	var t0 int64
+	if blockprofilerate > 0 {
+		t0 = cputicks()
+	}
+
+	lock(&c.lock)
+
+	if c.closed != 0 && c.qcount == 0 {
+		if raceenabled {
+			raceacquire(c.raceaddr())
+		}
+		unlock(&c.lock)
+		if ep != nil {
+			typedmemclr(c.elemtype, ep)
+		}
+		return true, false
+	}
+
+	if sg := c.sendq.dequeue(); sg != nil {
+		// Found a waiting sender. If buffer is size 0, receive value
+		// directly from sender. Otherwise, receive from head of queue
+		// and add sender's value to the tail of the queue (both map to
+		// the same buffer slot because the queue is full).
+		recv(c, sg, ep, func() { unlock(&c.lock) }, 3)
+		return true, true
+	}
+
+	if c.qcount > 0 {
+		// Receive directly from queue
+		qp := chanbuf(c, c.recvx)
+		if raceenabled {
+			raceacquire(qp)
+			racerelease(qp)
+		}
+		if ep != nil {
+			typedmemmove(c.elemtype, ep, qp)
+		}
+		typedmemclr(c.elemtype, qp)
+		c.recvx++
+		if c.recvx == c.dataqsiz {
+			c.recvx = 0
+		}
+		c.qcount--
+		unlock(&c.lock)
+		return true, true
+	}
+
+	if !block {
+		unlock(&c.lock)
+		return false, false
+	}
+
+	// no sender available: block on this channel.
+	gp := getg()
+	mysg := acquireSudog()
+	mysg.releasetime = 0
+	if t0 != 0 {
+		mysg.releasetime = -1
+	}
+	// No stack splits between assigning elem and enqueuing mysg
+	// on gp.waiting where copystack can find it.
+	mysg.elem = ep
+	mysg.waitlink = nil
+	gp.waiting = mysg
+	mysg.g = gp
+	mysg.isSelect = false
+	mysg.c = c
+	gp.param = nil
+	c.recvq.enqueue(mysg)
+	gopark(chanparkcommit, unsafe.Pointer(&c.lock), waitReasonChanReceive, traceEvGoBlockRecv, 2)
+
+	// someone woke us up
+	if mysg != gp.waiting {
+		throw("G waiting list is corrupted")
+	}
+	gp.waiting = nil
+	gp.activeStackChans = false
+	if mysg.releasetime > 0 {
+		blockevent(mysg.releasetime-t0, 2)
+	}
+	closed := gp.param == nil
+	gp.param = nil
+	mysg.c = nil
+	releaseSudog(mysg)
+	return true, !closed
+}
+```
+
+
+
+# 关闭
+
+```go
+func closechan(c *hchan) {
+  // hchan 为 nil 
+   if c == nil {
+      panic(plainError("close of nil channel"))
+   }
+
+   lock(&c.lock)
+   // 已经关闭，抛出异常 
+   if c.closed != 0 {
+      unlock(&c.lock)
+      panic(plainError("close of closed channel"))
+   }
+
+   if raceenabled {
+      callerpc := getcallerpc()
+      racewritepc(c.raceaddr(), callerpc, funcPC(closechan))
+      racerelease(c.raceaddr())
+   }
+
+   c.closed = 1
+
+   var glist gList
+
+   // release all readers
+  // recvq 队列中的数据加入到  glist 中
+   for {
+      sg := c.recvq.dequeue()
+      if sg == nil {
+         break
+      }
+      if sg.elem != nil {
+         typedmemclr(c.elemtype, sg.elem)
+         sg.elem = nil
+      }
+      if sg.releasetime != 0 {
+         sg.releasetime = cputicks()
+      }
+      gp := sg.g
+      gp.param = nil
+      if raceenabled {
+         raceacquireg(gp, c.raceaddr())
+      }
+      glist.push(gp)
+   }
+
+   // release all writers (they will panic)
+  // snedq 队列中的数据加入到  glist 中
+   for {
+      sg := c.sendq.dequeue()
+      if sg == nil {
+         break
+      }
+      sg.elem = nil
+      if sg.releasetime != 0 {
+         sg.releasetime = cputicks()
+      }
+      gp := sg.g
+      gp.param = nil
+      if raceenabled {
+         raceacquireg(gp, c.raceaddr())
+      }
+      glist.push(gp)
+   }
+   unlock(&c.lock)
+
+   // Ready all Gs now that we've dropped the channel lock.
+  //	 释放所有的 groutine 
+   for !glist.empty() {
+      gp := glist.pop()
+      gp.schedlink = 0
+      goready(gp, 3)
+   }
+}
+```
+
+在函数执行的最后会为所有被阻塞的 Goroutine 调用 goready 函数重新对这些协程进行调度。
+
+
+
+
+
+# selectchan 
+
+
+
+当我们在 Go 语言中使用 `select` 控制结构时，会遇到两个有趣的现象：
+
+1. `select` 能在 Channel 上进行非阻塞的收发操作；
+2. `select` 在遇到多个 Channel 同时响应时，会随机执行一种情况；
+
+
+
+在分析这个机制之前，我先通过 go tool 来分析在我们调用select在runtime时会调用哪个函数
+
+
+
+```go
+func main() {
+	c1 := make(chan int,1)
+	c2 := make(chan  int,1)
+
+	go func() {
+		c1 <- 1
+	}()
+
+	go func() {
+		c2 <-2
+	}()
+
+	select {
+	case <- c1:
+
+	case <-c2:
+
+	default:
+
+	}
+}
+```
+
+
+
+```
+go tool compile -l -N -S main.go 
+.....
+ 67     0x0167 00359 (main.go:15)   CALL    runtime.selectgo(SB)                                                                                                                        
+ 68     0x016c 00364 (main.go:15)   MOVQ    24(SP), AX
+ 69     0x0171 00369 (main.go:15)   MOVQ    AX, ""..autotmp_6+48(SP)
+ 70     0x0176 00374 (main.go:15)   MOVBLZX 32(SP), AX
+ 71     0x017b 00379 (main.go:15)   MOVB    AL, ""..autotmp_7+47(SP)
+ 72     0x017f 00383 (main.go:16)   CMPQ    ""..autotmp_6+48(SP), $0
+ 73     0x0185 00389 (main.go:16)   JEQ 393          
+ 74     0x0187 00391 (main.go:16)   JMP 411          
+ 75     0x0189 00393 (main.go:16)   PCDATA  $1, $-1  
+ 76     0x0189 00393 (main.go:16)   JMP 395          
+
+```
+
+
+
+可以看到当我们使用select 的时候，在runtime时候会被转换成  `runtime.selectgo`
+
+```go
+// selectgo implements the select statement.
+//
+// cas0 points to an array of type [ncases]scase, and order0 points to
+// an array of type [2*ncases]uint16 where ncases must be <= 65536.
+// Both reside on the goroutine's stack (regardless of any escaping in
+// selectgo).
+//
+// selectgo returns the index of the chosen scase, which matches the
+// ordinal position of its respective select{recv,send,default} call.
+// Also, if the chosen scase was a receive operation, it reports whether
+// a value was received.
+func selectgo(cas0 *scase, order0 *uint16, ncases int) (int, bool) {
+  .......
+}
+```
+
+
+
+在我们分析selectgo 之前，先来看一下 `scase` 这个结构体，这个`scase`结构体表示 `select` 控制结构中的 `case`：
+
+```go
+// Select case descriptor.
+// Known to compiler.
+// Changes here must also be made in src/cmd/internal/gc/select.go's scasetype.
+type scase struct {
+	c           *hchan         // chan
+	elem        unsafe.Pointer // data element
+	kind        uint16
+	pc          uintptr // race pc (for race detector / msan)
+	releasetime int64
+}
+
+```
+
+因为非默认的 `case` 中都与 channel 的发送和接收有关，所以 [`runtime.scase`](https://draveness.me/golang/tree/runtime.scase) 结构体中也包含一个 [`runtime.hchan`](https://draveness.me/golang/tree/runtime.hchan) 类型的字段存储 `case` 中使用的 channel。
+
+
+
+```go
+// selectgo implements the select statement.
+//
+// cas0 points to an array of type [ncases]scase, and order0 points to
+// an array of type [2*ncases]uint16 where ncases must be <= 65536.
+// Both reside on the goroutine's stack (regardless of any escaping in
+// selectgo).
+//
+// selectgo returns the index of the chosen scase, which matches the
+// ordinal position of its respective select{recv,send,default} call.
+// Also, if the chosen scase was a receive operation, it reports whether
+// a value was received.
+func selectgo(cas0 *scase, order0 *uint16, ncases int) (int, bool) {
+	if debugSelect {
+		print("select: cas0=", cas0, "\n")
+	}
+
+	// NOTE: In order to maintain a lean stack size, the number of scases
+	// is capped at 65536.
+	cas1 := (*[1 << 16]scase)(unsafe.Pointer(cas0))
+	order1 := (*[1 << 17]uint16)(unsafe.Pointer(order0))
+
+	scases := cas1[:ncases:ncases]
+	pollorder := order1[:ncases:ncases]
+	lockorder := order1[ncases:][:ncases:ncases]
+
+	// Replace send/receive cases involving nil channels with
+	// caseNil so logic below can assume non-nil channel.
+	for i := range scases {
+		cas := &scases[i]
+		if cas.c == nil && cas.kind != caseDefault {
+			*cas = scase{}
+		}
+	}
+
+	var t0 int64
+	if blockprofilerate > 0 {
+		t0 = cputicks()
+		for i := 0; i < ncases; i++ {
+			scases[i].releasetime = -1
+		}
+	}
+
+	// The compiler rewrites selects that statically have
+	// only 0 or 1 cases plus default into simpler constructs.
+	// The only way we can end up with such small sel.ncase
+	// values here is for a larger select in which most channels
+	// have been nilled out. The general code handles those
+	// cases correctly, and they are rare enough not to bother
+	// optimizing (and needing to test).
+
+	// generate permuted order
+  // 通过 runtime.fastrandn 函数引入随机性；
+	for i := 1; i < ncases; i++ {
+		j := fastrandn(uint32(i + 1))
+		pollorder[i] = pollorder[j]
+		pollorder[j] = uint16(i)
+	}
+
+	// sort the cases by Hchan address to get the locking order.
+	// simple heap sort, to guarantee n log n time and constant stack footprint.
+  //按照 Channel 的地址排序后确定加锁顺序；
+	for i := 0; i < ncases; i++ {
+		j := i
+		// Start with the pollorder to permute cases on the same channel.
+		c := scases[pollorder[i]].c
+		for j > 0 && scases[lockorder[(j-1)/2]].c.sortkey() < c.sortkey() {
+			k := (j - 1) / 2
+			lockorder[j] = lockorder[k]
+			j = k
+		}
+		lockorder[j] = pollorder[i]
+	}
+	for i := ncases - 1; i >= 0; i-- {
+		o := lockorder[i]
+		c := scases[o].c
+		lockorder[i] = lockorder[0]
+		j := 0
+		for {
+			k := j*2 + 1
+			if k >= i {
+				break
+			}
+			if k+1 < i && scases[lockorder[k]].c.sortkey() < scases[lockorder[k+1]].c.sortkey() {
+				k++
+			}
+			if c.sortkey() < scases[lockorder[k]].c.sortkey() {
+				lockorder[j] = lockorder[k]
+				j = k
+				continue
+			}
+			break
+		}
+		lockorder[j] = o
+	}
+
+	if debugSelect {
+		for i := 0; i+1 < ncases; i++ {
+			if scases[lockorder[i]].c.sortkey() > scases[lockorder[i+1]].c.sortkey() {
+				print("i=", i, " x=", lockorder[i], " y=", lockorder[i+1], "\n")
+				throw("select: broken sort")
+			}
+		}
+	}
+
+	// lock all the channels involved in the select
+	sellock(scases, lockorder)
+  .....
+}
+```
+
+
+
+轮询顺序 `pollOrder` 和加锁顺序 `lockOrder` 分别是通过以下的方式确认的：
+
+- 轮询顺序：通过 `runtime.fastrandn` 函数引入随机性；
+- 加锁顺序：按照 Channel 的地址排序后确定加锁顺序；
+
+随机的轮询顺序可以避免 channel 的饥饿问题，保证公平性；而根据 Channel 的地址顺序确定加锁顺序能够避免死锁的发生。这段代码最后调用的 `runtime.sellock` 会按照之前生成的加锁顺序锁定 `select` 语句中包含所有的 Channel。
+
+## 循环
+
+当我们为 `select` 语句锁定了所有 Channel 之后就会进入 `runtime.selectgo` 函数的主循环，它会分三个阶段查找或者等待某个 Channel 准备就绪：
+
+```go
+func selectgo(cas0 *scase, order0 *uint16, ncases int) (int, bool) {
+....	
+	for i := 0; i < ncases; i++ {
+		casi = int(pollorder[i])
+		cas = &scases[casi]
+		c = cas.c
+
+		switch cas.kind {
+		case caseNil:
+			continue
+
+		case caseRecv:
+			sg = c.sendq.dequeue()
+			if sg != nil {
+				goto recv
+			}
+			if c.qcount > 0 {
+				goto bufrecv
+			}
+			if c.closed != 0 {
+				goto rclose
+			}
+
+		case caseSend:
+			if raceenabled {
+				racereadpc(c.raceaddr(), cas.pc, chansendpc)
+			}
+			if c.closed != 0 {
+				goto sclose
+			}
+			sg = c.recvq.dequeue()
+			if sg != nil {
+				goto send
+			}
+			if c.qcount < c.dataqsiz {
+				goto bufsend
+			}
+
+		case caseDefault:
+			dfli = casi
+			dfl = cas
+		}
+	}
+
+```
+
+函数会根据不同情况通过 `goto` 语句跳转到函数内部的不同标签执行相应的逻辑，其中包括：
+
+-  `recv` 可以从休眠的发送方获取数据
+-  `bufrecv` 可以从缓冲区读取数据
+- `send` 可以向休眠的接收方发送数据
+- `bufsend`：可以向缓冲区写入数据；
+- `rclose`：可以从关闭的 Channel 读取 EOF；
+- `sclose`：向关闭的 Channel 发送数据；
+- `retc`：结束调用并返回；
+
+
+
+上述代码主要的功能是找所有 `case` 中是否有可以立刻被处理的 Channel。无论是在等待的 Goroutine 上还是缓冲区中，只要存在数据满足条件就会立刻处理，如果不能立刻找到活跃的 Channel 就会进入循环的下一阶段，按照需要将当前 Goroutine 加入到 channel 的 `sendq` 或者 `recvq` 队列中：
+
+```go
+	for _, casei := range lockorder {
+		casi = int(casei)
+		cas = &scases[casi]
+		if cas.kind == caseNil {
+			continue
+		}
+		c = cas.c
+		sg := acquireSudog()
+		sg.g = gp
+		sg.isSelect = true
+		// No stack splits between assigning elem and enqueuing
+		// sg on gp.waiting where copystack can find it.
+		sg.elem = cas.elem
+		sg.releasetime = 0
+		if t0 != 0 {
+			sg.releasetime = -1
+		}
+		sg.c = c
+		// Construct waiting list in lock order.
+		*nextp = sg
+		nextp = &sg.waitlink
+
+		switch cas.kind {
+		case caseRecv:
+			c.recvq.enqueue(sg)
+
+		case caseSend:
+			c.sendq.enqueue(sg)
+		}
+	}
+	.....
+	gopark(selparkcommit, nil, waitReasonSelect, traceEvGoBlockSelect, 1)
+	....
+}
+
+```
+
+除了将当前 Goroutine 对应的 `runtime.sudog` 结构体加入队列之外，这些结构体都会被串成链表附着在 Goroutine 上。在入队之后会调用 `runtime.gopark` 挂起当前 Goroutine 等待调度器的唤醒。
+
+等到 `select` 中的一些 Channel 准备就绪之后，当前 Goroutine 就会被调度器唤醒。
+
+```go
+unc selectgo(cas0 *scase, order0 *uint16, ncases int) (int, bool) {
+	...
+	sg = (*sudog)(gp.param)
+	gp.param = nil
+
+	casi = -1
+	cas = nil
+	sglist = gp.waiting
+	for _, casei := range lockorder {
+		k = &scases[casei]
+		if sg == sglist {
+			casi = int(casei)
+			cas = k
+		} else {
+			c = k.c
+			if int(casei) < nsends {
+				c.sendq.dequeueSudoG(sglist)
+			} else {
+				c.recvq.dequeueSudoG(sglist)
+			}
+		}
+		sgnext = sglist.waitlink
+		sglist.waitlink = nil
+		releaseSudog(sglist)
+		sglist = sgnext
+	}
+
+	c = cas.c
+	goto retc
+	...
+}
+```
+
+第三次遍历全部 `case` 时，我们会先获取当前 Goroutine 接收到的参数 `sudog` 结构，我们会依次对比所有 `case` 对应的 `sudog` 结构找到被唤醒的 `case`，获取该 `case` 对应的索引并返回。
+
+由于当前的 `select` 结构找到了一个 `case` 执行，那么剩下 `case` 中没有被用到的 `sudog` 就会被忽略并且释放掉。为了不影响 Channel 的正常使用，我们还是需要将这些废弃的 `sudog` 从 Channel 中出队。
+
+当我们在循环中发现缓冲区中有元素或者缓冲区未满时就会通过 `goto` 关键字跳转到 `bufrecv` 和 `bufsend` 两个代码段，这两段代码的执行过程都很简单，它们只是向 Channel 中发送数据或者从缓冲区中获取新数据：
+
+
+
+
+
