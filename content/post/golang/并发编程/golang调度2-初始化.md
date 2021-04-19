@@ -1,8 +1,10 @@
 ---
-用于栈的扩张和收缩检查，抢占标志title: "Golang调度2-初始化"
+title: "Golang调度2-初始化"
 date: 2021-01-18T15:11:40+08:00
 draft: true
 ---
+
+# 开始
 
 我们从一个 `HelloWorld` 的例子来回顾一下 Go 程序初始化的过程：
 
@@ -100,6 +102,8 @@ TEXT _rt0_amd64(SB),NOSPLIT,$-8
 	LEAQ	8(SP), SI	// argv  /计算内存地址，然后把内存地址本身放进寄存器里，也就是把 argv 的地址放到了 SI 寄存器中。最后跳转到 rumtine.rt0_go
 	JMP	runtime·rt0_go(SB)
 ```
+
+# rt0_go 
 
 主要是把 argc，argv 从内存拉到了寄存器。这里 LEAQ 是计算内存地址，然后把内存地址本身放进寄存器里，也就是把 argv 的地址放到了 SI 寄存器中。最后跳转到 rumtine.rt0_go
 
@@ -292,7 +296,7 @@ TEXT runtime·asminit(SB),NOSPLIT,$0-0
 
 
 
-主线程和m0的绑定
+# 主线程和m0的绑定
 
 ```go
 	
@@ -319,6 +323,8 @@ TEXT runtime·asminit(SB),NOSPLIT,$0-0
 settls 是干嘛的？
 
 > 因为 m0 是全局变量，而 m0 又要绑定到工作线程才能执行。我们又知道，runtime 会启动多个工作线程，每个线程都会绑定一个 m0。而且，代码里还得保持一致，都是用 m0 来表示。这就要用到线程本地存储的知识了，也就是常说的 TLS（Thread Local Storage）。简单来说，TLS 就是线程本地的私有的全局变量。
+> 一般而言，全局变量对进程中的多个线程同时可见。进程中的全局变量与函数内定义的静态（static）变量，是各个线程都可以访问的共享变量。一个线程修改了，其他线程就会“看见”。要想搞出一个线程私有的变量，就需要用到 TLS 技术。
+> 如果需要在一个线程内部的各个函数调用都能访问、但其它线程不能访问的变量（被称为 static memory local to a thread，线程局部静态变量），就需要新的机制来实现。这就是 TLS。
 
 
 
@@ -350,6 +356,34 @@ TEXT runtime·settls(SB),NOSPLIT,$32
 
 
 
+继续看源码， m0.tls 地址存储到 DI 寄存器，再调用 settls 完成 tls 的设置，tls 是 m 结构体中的一个数组。
+
+```go
+// thread-local storage (for x86 extern register)
+tls [6]uintptr
+```
+
+设置完 tls 之后，又来了一段验证上面 settls 是否能正常工作。如果不能，会直接 crash。
+
+```go
+	get_tls(BX)
+	MOVQ	$0x123, g(BX)
+	MOVQ	runtime·m0+m_tls(SB), AX
+	CMPQ	AX, $0x123
+	JEQ 2(PC)
+	CALL	runtime·abort(SB)
+```
+
+
+
+第一行代码，获取 tls， `get_tls(BX)` 的代码由编译器生成，源码中并没有看到，可以理解为将 `m.tls` 的地址存入 BX 寄存器。
+
+L2 将一个数 `0x123` 放入 `m.tls[0]` 处，L3 则将 `m.tls[0]` 处的数据取出来放到 AX 寄存器，L4 则比较两者是否相等。如果相等，则跳过 L6 行的代码，否则执行 L6，程序 crash。
+
+继续看代码：
+
+
+
 继续下一段代码
 
 
@@ -373,7 +407,21 @@ TEXT runtime·settls(SB),NOSPLIT,$32
 	MOVQ	AX, g_m(CX)
 ```
 
-继续下一段代码
+这一段代码的主要功能是将m0 和 go 进行版本
+
+```go
+tls[0] = g0
+m0.g0 = &g0
+g0.m = &m0
+```
+
+这一段执行完之后，就把 m0，g0，m.tls[0] 串联起来了。通过 m.tls[0] 可以找到 g0，通过 g0 可以找到 m0（通过 g 结构体的 m 字段）。并且，通过 m 的字段 g0，m0 也可以找到 g0。于是，主线程和 m0，g0 就关联起来了。
+
+
+
+![image-20210124163757260](../image-20210124163757260.png)
+
+继续看一下代码
 
 ```go
 	MOVL	16(SP), AX		// copy argc
@@ -386,8 +434,11 @@ TEXT runtime·settls(SB),NOSPLIT,$32
 	CALL	runtime·osinit(SB)
 	CALL	runtime·schedinit(SB)
 ```
+这段代码初始是 初始化一些系统设置和调度，我们主要来看 schedinit 
 
-初始化schedule 
+# 初始化schedule 
+
+
 
 ```go
 func schedinit() {
@@ -463,11 +514,31 @@ func schedinit() {
 }
 ```
 
+这个函数开头的注释很贴心地把 Go 程序初始化的过程又说了一遍：
+
+1. call osinit。初始化系统核心数。
+2. call schedinit。初始化调度器。
+3. make & queue new G。创建新的 goroutine。
+4. call runtime·mstart。调用 mstart，启动调度。
+5. The new G calls runtime·main。在新的 goroutine 上运行 runtime.main 函数。
+
+函数首先调用 `getg()` 函数获取当前正在运行的 `g`， `getg()` 在 `src/runtime/stubs.go` 中声明，真正的代码由编译器生成。
 
 
-![image-20210124163757260](../image-20210124163757260.png)
 
-初始化 m0 
+继续往下看：
+
+```
+sched.maxmcount = 10000
+```
+
+设置最多只能创建 10000 个工作线程。
+
+然后，调用了一堆 init 函数，初始化各种配置，现在不去深究。只关心本小节的重点，m0 的初始化：
+
+
+
+# 初始化 m0 
 
 ```go
 // Pre-allocated ID may be passed as 'id', or omitted by passing -1.
@@ -522,11 +593,72 @@ func mcommoninit(mp *m, id int64) {
 
 ```
 
+因为 sched 是一个全局变量，多个线程同时操作 sched 会有并发问题，因此先要加锁，操作结束之后再解锁。
+
+```go
+if id >= 0 {
+		mp.id = id
+	} else {
+		mp.id = mReserveID()
+	}
+	
+// mReserveID returns the next ID to use for a new m. This new m is immediately
+// considered 'running' by checkdead.
+//
+// sched.lock must be held.
+func mReserveID() int64 {
+	if sched.mnext+1 < sched.mnext {
+		throw("runtime: thread ID overflow")
+	}
+	id := sched.mnext
+	sched.mnext++
+	checkmcount()
+	return id
+}	
+```
+
+可以看到，m0 的 id 是 0，并且之后创建的 m 的 id 是递增的。`checkmcount()` 函数检查已创建系统线程是否超过了数量限制（10000）。
 
 
 
+```
+mp.alllink = allm
+```
 
-创建 P
+将 m 挂到全局变量 allm 上，allm 是一个指向 m 的的指针。
+
+```
+atomicstorep(unsafe.Pointer(&allm), unsafe.Pointer(mp))
+```
+
+这一行将 allm 变成 m 的地址，这样变成了一个循环链表。之后再新建 m 的时候，新 m 的 alllink 就会指向本次的 m，最后 allm 又会指向新创建的 m。
+
+![image-20210329103220418](image-20210329103220418.png)
+
+
+
+上图中，1 将 m0 挂在 allm 上。之后，若新创建 m，则 m1 会和 m0 相连。
+
+
+
+# 初始化 allp 
+
+从schedule 跳过一些其他的初始化代码，继续往后看：
+
+```go
+	procs := ncpu
+	if n, ok := atoi32(gogetenv("GOMAXPROCS")); ok && n > 0 {
+		procs = n
+	}
+	if procresize(procs) != nil {
+		throw("unknown runnable goroutine during bootstrap")
+	}
+
+```
+
+这里就是设置 procs，它决定创建 P 的数量。ncpu 这里已经被赋上了系统的核心数，因此代码里不设置 GOMAXPROCS 也是没问题的。这里还限制了 procs 的最大值，为 1024。
+
+来看最后一个核心的函数：
 
 ```go
 // Change number of processors. The world is stopped, sched is locked.
@@ -638,6 +770,108 @@ func procresize(nprocs int32) *p {
 	return runnablePs
 }
 ```
+
+代码比较长，这个函数不仅是初始化的时候会执行到，在中途改变 procs 的值的时候，仍然会调用它。所有存在很多一般不用关心的代码，因为一般不会在中途重新设置 procs 的值。我把初始化无关的代码删掉了，这样会更清晰一些。
+
+函数先是从堆上创建了 nproc 个 P，并且把 P 的状态设置为 _Pgcstop，现在全局变量 allp 里就维护了所有的 P。
+
+接着，调用函数 acquirep 将 p0 和 m0 关联起来。我们来详细看一下：
+
+```go
+// Associate p and the current m.
+//
+// This function is allowed to have write barriers even if the caller
+// isn't because it immediately acquires _p_.
+//
+//go:yeswritebarrierrec
+func acquirep(_p_ *p) {
+	// Do the part that isn't allowed to have write barriers.
+	wirep(_p_)
+
+	// Have p; write barriers now allowed.
+
+	// Perform deferred mcache flush before this P can allocate
+	// from a potentially stale mcache.
+	_p_.mcache.prepareForSweep()
+
+	if trace.enabled {
+		traceProcStart()
+	}
+}
+
+// wirep is the first step of acquirep, which actually associates the
+// current M to _p_. This is broken out so we can disallow write
+// barriers for this part, since we don't yet have a P.
+//
+//go:nowritebarrierrec
+//go:nosplit
+func wirep(_p_ *p) {
+	_g_ := getg()
+
+	if _g_.m.p != 0 {
+		throw("wirep: already in go")
+	}
+	if _p_.m != 0 || _p_.status != _Pidle {
+		id := int64(0)
+		if _p_.m != 0 {
+			id = _p_.m.ptr().id
+		}
+		print("wirep: p->m=", _p_.m, "(", id, ") p->status=", _p_.status, "\n")
+		throw("wirep: invalid p state")
+	}
+	_g_.m.p.set(_p_)
+	_p_.m.set(_g_.m)
+	_p_.status = _Prunning
+}
+
+```
+
+可以看到就是一些字段相互设置，执行完成后：
+```
+g0.m.p = p0
+p0.m = m0
+```
+
+并且，p0 的状态变成了 _Prunning。
+
+接下来是一个循环，它将除了 p0 的所有非空闲的 P，放入 P 链表 runnablePs，并返回给 procresize 函数的调用者，并由调用者来“调度”这些 P。
+
+函数 runqempty 用来判断一个 P 是否是空闲，依据是 P 的本地 run queue 队列里有没有 runnable 的 G，如果没有，那 P 就是空闲的
+
+```go
+// runqempty reports whether _p_ has no Gs on its local run queue.
+// It never returns true spuriously.
+func runqempty(_p_ *p) bool {
+	// Defend against a race where 1) _p_ has G1 in runqnext but runqhead == runqtail,
+	// 2) runqput on _p_ kicks G1 to the runq, 3) runqget on _p_ empties runqnext.
+	// Simply observing that runqhead == runqtail and then observing that runqnext == nil
+	// does not mean the queue is empty.
+	for {
+		head := atomic.Load(&_p_.runqhead)
+		tail := atomic.Load(&_p_.runqtail)
+		runnext := atomic.Loaduintptr((*uintptr)(unsafe.Pointer(&_p_.runnext)))
+		if tail == atomic.Load(&_p_.runqtail) {
+			return head == tail && runnext == 0
+		}
+	}
+}
+```
+
+并不是简单地判断 head == tail 并且 runnext == nil 为真，就可以说明 runq 是空的。因为涉及到一些数据竞争，例如在比较 head == tail 时为真，但此时 runnext 上其实有一个 G，之后再去比较 runnext == nil 的时候，这个 G 又通过 runqput跑到了 runq 里去了或者通过 runqget 拿走了，runnext 也为真，于是函数就判断这个 P 是空闲的，这就会形成误判。
+
+因此 runqempty 函数先是通过原子操作取出了 head，tail，runnext，然后再次确认 tail 没有发生变化，最后再比较 head == tail 以及 runnext == nil，保证了在观察三者都是在“同时”观察到的，因此，返回的结果就是正确的。
+
+说明一下，runnext 上有时会绑定一个 G，这个 G 是被当前 G 唤醒的，相比其他 G 有更高的执行优先级，因此把它单独拿出来。
+
+函数的最后，初始化了一个“随机分配器”：
+
+```go
+stealOrder.reset(uint32(nprocs))
+```
+
+将来有些 m 去偷工作的时候，会遍历所有的 P，这时为了偷地随机一些，就会用到 stealOrder 来返回一个随机选择的 P，后面的文章会再讲。
+
+
 
 ![image-20210124163815608](../image-20210124163815608.png)
 

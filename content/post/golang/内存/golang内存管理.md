@@ -117,9 +117,9 @@ const (
 )
 
 type heapArena struct {
-	bitmap       [heapArenaBitmapBytes]byte
-	spans        [pagesPerArena]*mspan      
-	pageInUse    [pagesPerArena / 8]uint8
+	bitmap       [heapArenaBitmapBytes]byte  //[2M]byte
+	spans        [pagesPerArena]*mspan      // [8K]*mspan mspan 
+	pageInUse    [pagesPerArena / 8]uint8   //标记页使用 
 	pageMarks    [pagesPerArena / 8]uint8
 	pageSpecials [pagesPerArena / 8]uint8
 	checkmarks   *checkmarksMap
@@ -128,8 +128,18 @@ type heapArena struct {
 ```
 
 - bitmap 一个2MB个byte数组来标记这个heap area 64M 内存的使用情况，bitmap位图主要为GC标记数组，用2bits标记8(PtrSize) 个byte的使用情况。之所以用2个bits，一是标记对应地址中是否存在对象，另外是标记此对象是否被gc标记过。一个功能一个bit位，所以， heap bitmaps用两个bit位. 
+
+  ```
+  1M ---- 64M
+  1bit --- 64bit --- 8 bytes 
+  ```
+
+  
+
 - spans：是一个8192（pagesPerArena）大小的指针数组，每个mspan是8KB；
+
 - pageInUse：是一个位图，使用1024 * 8 bit来标记 8192个页(8192*8KB = 64MB)中哪些页正在使用中；
+
 - pageMarks：标记页，与GC相关；
 
 ## mspan 
@@ -404,7 +414,7 @@ func allocmcache() *mcache {
 
 
 
-## 重mheap 获取 mspan 
+## 从mheap 获取 mspan 
 
 mcahce.refill会为线程缓存获取一个指定跨度类的内存管理单元，被替换的单元不能包含空闲的内存空间，而获取的单元中需要至少包含一个空闲对象用于分配内存.
 

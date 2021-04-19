@@ -9,7 +9,7 @@ draft: true
 
 ​	
 
-创建 main gourtine 
+# 创建 main gourtine 
 
 
 
@@ -32,6 +32,10 @@ schedinit完成调度系统初始化后，返回到rt0_go函数中开始调用ne
 	RET
 ```
 
+
+
+
+
 其中 L2 中的 runtime·mainPC(SB) 定义如下
 
 ```go
@@ -43,6 +47,10 @@ DATA	runtime·mainPC+0(SB)/8,$runtime·main(SB)
 所以 mainPC 就是runtime.main  
 
 通过  L4 ~ L5 调用 runtime.newproc函数 
+
+# newproc
+
+newproce 主要的功能是创建一个一个新的 g，运行 fn 函数，需要 siz byte 的参数
 
 ```go
 // Create a new g running fn with siz bytes of arguments.
@@ -60,10 +68,69 @@ DATA	runtime·mainPC+0(SB)/8,$runtime·main(SB)
 // be able to adjust them and stack splits won't be able to copy them.
 //go:nosplit
 func newproc(siz int32, fn *funcval) {
+  ......
   // fn 函数的地址
   // &fn 存放函数的栈地址
   // argp 指向fn函数的第一个参数
 	argp := add(unsafe.Pointer(&fn), sys.PtrSize)
+  .....
+}
+```
+
+newproc 参数
+
+-  第一个参数则是 runtime.main 函数的地址参数的大小。
+- 第二个参数则是 runtime.main 函数的地址
+
+
+
+为什么要给 `newproc` 传一个表示 fn 的参数大小的参数呢？
+
+
+
+> 我们知道，goroutine 和线程一样，都有自己的栈，不同的是 goroutine 的初始栈比较小，只有 2K，而且是可伸缩的，这也是创建 goroutine 的代价比创建线程代价小的原因。
+>
+> 换句话说，每个 goroutine 都有自己的栈空间，newproc 函数会新创建一个新的 goroutine 来执行 fn 函数，在新 goroutine 上执行指令，就要用新 goroutine 的栈。而执行函数需要参数，这个参数又是在老的 goroutine 上，所以需要将其拷贝到新 goroutine 的栈上。拷贝的起始位置就是栈顶，这好办，那拷贝多少数据呢？由 siz 来确定。
+
+
+
+继续看代码，newproc 函数的第二个参数：
+
+```go
+type funcval struct{
+    fn uintptr
+		// variable-size, fn-specific data here
+
+}
+```
+
+它是一个变长结构，第一个字段是一个指针 fn，内存中，紧挨着 fn 的是函数的参数。
+
+我们来看一个例子
+
+```go
+package main
+func hello(msg string) {
+    println(msg)
+}
+func main() {
+    go hello("hello world")
+}
+```
+
+其栈布局是这样的
+
+![image-20210329230233941](image-20210329230233941.png)
+
+
+
+栈顶是 siz，再往上是函数的地址，再往上就是传给 hello 函数的参数，string 在这里是一个地址。因此前面代码里先 push 参数的地址，再 push 参数大小。
+
+
+
+```go
+func newproc(siz int32, fn *funcval) {
+	.....
   //获取正在运行的g，初始化时是m0.g0
 	gp := getg()
   // 返回调用者的下一个执行地址,对于我们现在这个场景来说，pc就是CALLruntime·newproc(SB)指令后面的POPQ AX这条指令的地址
@@ -83,7 +150,13 @@ func newproc(siz int32, fn *funcval) {
 }
 ```
 
+接着通过 getcallerpc 获取调用者的指令地址，也就是调用 newproc 时由 call 指令压栈的函数返回地址，也就是 `runtime·rt0_go` 函数里 `CALL runtime·newproc(SB)` 指令后面的 `POPQ AX` 这条指令的地址
 
+
+
+最后，调用 systemstack 函数在 g0 栈执行 fn 函数。由于本文讲述的是初始化过程中，由 `runtime·rt0_go` 函数调用，本身是在 g0 栈执行，因此会直接执行 fn 函数。而如果是我们在程序中写的 `go xxx` 代码，在执行时，就会先切换到 g0 栈执行，然后再切回来。
+
+# newproc1 
 
 newproc1通过调用 newproc1来创建一个信息的g，并把其放入当前的p中，等待调度，有于 newproc1比较长，所以需要一段一段的查看
 
@@ -154,16 +227,57 @@ func newproc1(fn *funcval, argp unsafe.Pointer, narg int32, callergp *g, callerp
 	}
 ```
 
-这段代码的主要功能是从堆上分配一个新的结构体g,并为这个newg分配一个2048字节的栈空间，并设置newg 的 stack 参数，然后把newg需要执行的函数的参数从执行newproc函数的栈（初始化时是g0栈）拷贝到newg的栈，完成这些事情之后newg的状态如下图
+当前代码在 g0 栈上执行，因此执行完 `_g_:=getg()` 之后，无论是在什么情况下都可以得到 `_g_=g0`。之后通过 g0 找到其绑定的 P，也就是 p0。
+
+接着，尝试从 p0 上找一个空闲的 G：
+
+```go
+// 从 p 的本地缓冲里获取一个没有使用的 g，初始化时为空，返回 nilnewg := gfget(_p_)
+```
+
+
+
+如果拿不到，则会在堆上创建一个新的 G，为其分配 2KB 大小的栈，并设置好新 goroutine 的 stack 成员，设置其状态为 _Gdead，并将其添加到全局变量 allgs 中。创建完成之后，我们就在堆上有了一个 2K 大小的栈
+
+
 
 ![go_schedule](../go_schedule.png)
 
 
 
-继续来看newproc1的代码
+#  g0 栈和用户栈切换
+
+`g0` 栈用于执行调度器的代码，执行完之后，要跳转到执行用户代码的地方，如何跳转？这中间涉及到栈和寄存器的切换。要知道，函数调用和返回主要靠的也是 CPU 寄存器的切换。 `goroutine` 的切换和此类似。
+
+
+
+继续看 `proc1` 函数的代码。中间有一段调整运行空间的代码，计算出的结果一般为 0，也就是一般不会调整 SP 的位置，忽略好了。
 
 ```go
- // 把 newg.sched 分配内存
+// 确定参数入栈位置
+spArg := sp
+```
+
+参数的入参位置也是从 SP 处开始，通过：
+
+```go
+// 将参数从执行 newproc 函数的栈拷贝到新 g 的栈
+memmove(unsafe.Pointer(spArg), unsafe.Pointer(argp), uintptr(narg))
+```
+
+
+
+将 fn 的参数从 g0 栈上拷贝到 newg 的栈上，memmove 函数需要传入源地址、目的地址、参数大小。由于 main 函数在这里没有参数需要拷贝，因此这里相当于没做什么。
+
+接着，初始化 newg 的各种字段，而且涉及到最重要的 pc，sp 等字段
+
+
+
+```go
+func newproc1(fn *funcval, argp unsafe.Pointer, narg int32, callergp *g, callerpc uintptr) *g {
+... 
+
+// 把 newg.sched 分配内存
 	memclrNoHeapPointers(unsafe.Pointer(&newg.sched), unsafe.Sizeof(newg.sched))
 	//设置 newg 的 sched 成员，调度器需要依靠这些字段才能把 goroutine 调度到 CPU 上运行
   newg.sched.sp = sp//newg的栈顶
@@ -174,9 +288,29 @@ func newproc1(fn *funcval, argp unsafe.Pointer, narg int32, callergp *g, callerp
   newg.sched.pc = funcPC(goexit) + sys.PCQuantum // +PCQuantum so that previous instruction is in same function
 	newg.sched.g = guintptr(unsafe.Pointer(newg))
 	gostartcallfn(&newg.sched, fn)//调整sched成员和newg的栈
+ return ...  
+}
 ```
 
-上面的代码首先对newg的sched 进行初始化,包含了调度器代码在调度gourtine到CPU运行时所必须的一些信息,其中sched的sp成员表示newg被调度起来运行时使用的栈顶,sched的pc成员表示当newg被调度起来运行时从这个地址开始执行指令，然而从上面的代码可以看到，new.sched.pc被设置成了goexit函数的第二条指令的地址而不是fn.fn，这是为什么呢？要回答这个问题，必须深入到gostartcallfn函数中做进一步分析。
+上面的代码首先对newg的sched 进行初始化,包含了调度器代码在调度gourtine到CPU运行时所必须的一些信息。
+
+其中sched的sp成员表示newg被调度起来运行时使用的栈顶。
+
+sched的pc成员表示当newg被调度起来运行时从这个地址开始执行指令
+
+然而从上面的代码可以看到，new.sched.pc被设置成了goexit函数的第二条指令的地址而不是fn.fn，这是为什么呢？
+
+```go
+  newg.sched.pc = funcPC(goexit) + sys.PCQuantum // +PCQuantum so that previous instruction is in same function
+```
+
+
+
+## gostartcallfn 
+
+要回答这个问题，必须深入到gostartcallfn函数中做进一步分析。
+
+
 
 ```go
 // adjust Gobuf as if it executed a call to fn
@@ -217,8 +351,8 @@ func gostartcall(buf *gobuf, fn, ctxt unsafe.Pointer) {
 
 gostartcall函数的主要作用有两个：
 
-1. 调整newg的栈空间，把goexit函数的第二条指令的地址入栈，伪造成goexit函数调用了fn，从而使fn执行完成后执行ret指令时返回到goexit继续执行完成最后的清理工作；
-2. 重新设置newg.buf.pc 为需要执行的函数的地址，即fn，我们这个场景为runtime.main函数的地址。
+1. **调整newg的栈空间，把goexit函数的第二条指令的地址入栈，伪造成goexit函数调用了fn，从而使fn执行完成后执行ret指令时返回到goexit继续执行完成最后的清理工作；**
+2. **重新设置newg.buf.pc 为需要执行的函数的地址，即fn，我们这个场景为runtime.main函数的地址。**
 
 
 

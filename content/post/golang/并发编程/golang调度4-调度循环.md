@@ -19,6 +19,8 @@ draft: true
 
 很简单的一段代码,runtime.mstart进入调度循环，如果失败，会调用runtime.abort退出.
 
+# mstart 
+
 接下来看mstart代码
 
 ```go
@@ -62,6 +64,10 @@ func mstart() {
 
 `mstart` 函数设置了 stackguard0 和 stackguard1 字段后，就直接调用 mstart1() 函数：
 
+
+
+# mstart1 
+
 ```go 
 func mstart1() {
   //这里的 _g_ = m0.g0 
@@ -104,6 +110,8 @@ func mstart1() {
 
 mstart1首先调用save函数来保存g0的调度信息,其中getcallerpc()返回的是mstart调用mstart1时被call指令压栈的返回地址，getcallersp()函数返回的是调用mstart1函数之前mstart函数的栈顶地址。我们接下来看一下 save代码
 
+# save 保存g0 信息
+
 ```go
 func save(pc, sp uintptr) {
 	_g_ := getg()
@@ -128,6 +136,8 @@ func save(pc, sp uintptr) {
 从上图可以看出，g0.sched.sp指向了mstart1函数执行完成后的返回地址，该地址保存在了mstart函数的栈帧之中；g0.sched.pc指向的是mstart函数中调用mstart1函数之后的 if 语句。
 
 
+
+# schedule 
 
 继续分析代码，save函数执行完成后，返回到mstart1继续其它跟m相关的一些初始化，完成这些初始化后则调用调度系统的核心函数schedule()完成goroutine的调度
 
@@ -338,6 +348,12 @@ TEXT runtime·gogo(SB), NOSPLIT, $16-8
  ```
 
 现在已经从g0切换到了gp这个goroutine，对于我们这个场景来说，gp还是第一次被调度起来运行，它的入口函数是runtime.main.
+
+
+
+用一张流程图总结一下从 g0 切换到 main goroutine 的过程：
+
+![image-20210330165116311](image-20210330165116311.png)
 
 
 

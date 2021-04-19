@@ -6,9 +6,13 @@ draft: true
 
 详细分析 schedule 函数
 
+# schedule 
+
 
 
 之前分析main goroutine的调度时我们已经见过schedule函数，因为当时我们的主要关注点在于main goroutine是如何被调度到CPU上运行的，所以并未对schedule函数如何挑选下一个goroutine出来运行做深入的分析，现在我们可以重新分析一下schedule 函数
+
+
 
 ```go
 // One round of scheduler: find a runnable goroutine and execute it.
@@ -75,7 +79,7 @@ top:
 
 
 
-## 从全局运行队列中获取groutine 
+# 从全局运行队列中获取groutine 
 
 ```go
 // Try get a batch of G's from the global runnable queue.
@@ -117,7 +121,7 @@ func globrunqget(_p_ *p, max int32) *g {
 
 
 
-## 从本地获取g
+# 从本地获取g
 
 ```go
 // Get g from local runnable queue.

@@ -38,43 +38,82 @@ skiplist相邻两个节点增加一个指针，让指针指向下下个节点,�
 
 
 
-# Redis 中Skiplist
+# 源码分析
+
+## 数据结构
 
 
 
-```c
-/* ZSETs use a specialized version of Skiplists */
+```go
+* ZSETs use a specialized version of Skiplists */
 typedef struct zskiplistNode {
-  	// key 值
     sds ele;
-  	// value 值
-    double score;
-  	//后退指针 
-    struct zskiplistNode *backward;
-   //各层的前进指针
+    double score; //分数
+    struct zskiplistNode *backward;//后向指针
     struct zskiplistLevel {
-         // 前进指针
-        struct zskiplistNode *forward;
-        //跨度  
-       unsigned long span;
+        struct zskiplistNode *forward;//每一层中的前向指针
+        unsigned int span;//x.level[i].span 表示节点x在第i层到其下一个节点需跳过的节点数。注：两个相邻节点span为1
     } level[];
 } zskiplistNode;
 
 typedef struct zskiplist {
     struct zskiplistNode *header, *tail;
-    unsigned long length;
-    int level;
+    unsigned long length;//节点总数
+    int level;//总层数 
 } zskiplist;
 ```
 
 
 
 - 节点的分值(score属性)是一个double类型的浮点数，跳跃表中的所有节点都按分值从小到大来排序。
--  节点的后退指针 ( backward 属性 ) 用于从表尾向表头方向访问节点：跟可以一次跳过多个节点的前进指针不同，因为每个节点只有一个后退指针，所以每次只能后退至前一个节点。
+- 节点的后退指针 ( backward 属性 ) 用于从表尾向表头方向访问节点：跟可以一次跳过多个节点的前进指针不同，因为每个节点只有一个后退指针，所以每次只能后退至前一个节点。
 
 
 
-# 创建跳跃表
+![img](redis_skiplist.png)
+
+## 随机算法
+
+```c
+int zslRandomLevel(void) {
+    int level = 1;
+    while ((random()&0xFFFF) < (ZSKIPLIST_P * 0xFFFF))
+        level += 1;
+    return (level<ZSKIPLIST_MAXLEVEL) ? level : ZSKIPLIST_MAXLEVEL;
+}
+```
+
+这个代码的伪代码大概如下
+
+```c
+randomLevel()
+    level := 1
+    // random()返回一个[0...1)的随机数
+    while random() < p and level < MaxLevel do  
+        level := level + 1
+    return level
+```
+
+
+
+其中 p = 0.25  MaxLevel = 32
+
+根据前面randomLevel()的伪码，我们很容易看出，产生越高的节点层数，概率越低。定量的分析如下：
+
+- 节点层数至少为1。而大于1的节点层数，满足一个概率分布。
+- 节点层数恰好等于1的概率为$ (1-p) $。
+- 节点层数恰好等于2的概率为$ p(1-p) $)。
+- 节点层数恰好等于3的概率为$ p^2(1-p) $。
+- 节点层数恰好等于4的概率为$ p^3(1-p) $。
+- 节点层数恰好等于32的概率为$ p^{31}(1-p) $。
+
+
+
+
+
+
+
+## 创建跳跃表
 
 ```c
 /* Create a new skiplist. */
@@ -87,7 +126,7 @@ zskiplist *zslCreate(void) {
     zsl->length = 0;
   	//创建头节点
     zsl->header = zslCreateNode(ZSKIPLIST_MAXLEVEL,0,NULL);
-  	//ZSKIPLIST_MAXLEVEL 32 ，也就是说可以容纳 2^64个值
+
     for (j = 0; j < ZSKIPLIST_MAXLEVEL; j++) {
         zsl->header->level[j].forward = NULL;
         zsl->header->level[j].span = 0;
@@ -108,7 +147,7 @@ zskiplistNode *zslCreateNode(int level, double score, sds ele) {
 }
 ```
 
-# 插入数据
+## 插入数据
 
 
 
@@ -117,8 +156,10 @@ zskiplistNode *zslCreateNode(int level, double score, sds ele) {
  * exist (up to the caller to enforce that). The skiplist takes ownership
  * of the passed SDS string 'ele'. */
 zskiplistNode *zslInsert(zskiplist *zsl, double score, sds ele) {
-    zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *x;//插入节点函数的实现中有一个 update 数组，它里面记录的是每一层中位于插入节点的前一个节
-    unsigned int rank[ZSKIPLIST_MAXLEVEL];//记录的是每一层中位于插入节点的前一个节点的排名，也就是 update 数组中每个节点的排名，
+  	// update数组用来记录每一层的最后一个分数小于待插入score的节点
+    zskiplistNode *update[ZSKIPLIST_MAXLEVEL], *x;
+ 	 //rank数组用来记录上述插入位置的上一个节点的排名，以便于最后更新span值。
+    unsigned int rank[ZSKIPLIST_MAXLEVEL];
     int i, level;
 
     serverAssert(!isnan(score));
@@ -189,6 +230,34 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, sds ele) {
 
 
 
+## 删除节点
+
+```c
+/* Internal function used by zslDelete, zslDeleteRangeByScore and
+ * zslDeleteRangeByRank. */
+void zslDeleteNode(zskiplist *zsl, zskiplistNode *x, zskiplistNode **update) {
+    int i;
+    for (i = 0; i < zsl->level; i++) {
+        if (update[i]->level[i].forward == x) {
+            update[i]->level[i].span += x->level[i].span - 1;
+            update[i]->level[i].forward = x->level[i].forward;
+        } else {
+            update[i]->level[i].span -= 1;
+        }
+    }
+    if (x->level[0].forward) {
+        x->level[0].forward->backward = x->backward;
+    } else {
+        zsl->tail = x->backward;
+    }
+    while(zsl->level > 1 && zsl->header->level[zsl->level-1].forward == NULL)
+        zsl->level--;
+    zsl->length--;
+}
+```
+
+
+
 参考 
 
 https://www.w3cschool.cn/hdclil/pea3uozt.html
@@ -196,4 +265,6 @@ https://www.w3cschool.cn/hdclil/pea3uozt.html
 Redis内部数据结构详解(6)——skiplist http://zhangtielei.com/posts/blog-redis-skiplist.html
 
 Redis源码阅读笔记--跳跃表zskiplist https://zhuanlan.zhihu.com/p/49295806 
+
+Redis Internal Data Structure : Skiplist http://blog.wjin.org/posts/redis-internal-data-structure-skiplist.html
 
