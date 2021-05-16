@@ -16,6 +16,8 @@ draft: true
 
 
 
+
+
 ## 为什么设计Raft 
 
 在分布式学术理论界，最耀眼的还是大名鼎鼎的Paxos。但Paxos是：少数真正理解的人觉得简单，尚未理解的人觉得很难，大多数人都是一知半解。本人也花了很多时间、看了很多材料也没有真正理解。直到看到raft的论文，两位研究者也提到，他们也花了很长的时间来理解Paxos，他们也觉得很难理解，最后Raft 使用了特定的技术来提高可理解性，包括分解（Raft 分离 leader 选举，日志复制和安全）和状态空间减少（相对于 Paxos ，Raft 减少了不确定性程度和服务器之间彼此不一致的方式 ）。
@@ -83,6 +85,12 @@ Raft 算法在许多方面和现有的一致性算法都很相似（主要是 Ok
 
 
 # Raft 的实现
+
+Raft 是一种用来管理第 2 节中描述的复制日志的算法。图 2 是该算法的浓缩，可用作参考，图 3 列举了该算法的一些关键特性。图中的这些内容将在剩下的章节中逐一介绍。
+
+![image-20210420165908116](image-20210420165908116.png)
+
+![image-20210420165957666](image-20210420165957666.png)
 
 ## Raft 的基础
 
@@ -236,3 +244,82 @@ Raft 为了解决这种问题，使用下面的方式强制将自己的日志复
 
 
 通过以上的方式，Raft 实现了对从 leader 到 followers 的日志复制，并确保少于一半的节点故障不会影响系统的正常运行和性能。
+
+
+
+
+
+# 安全性
+
+> The previous sections described how Raft elects leaders and replicates log entries. However, the mechanisms described so far are not quite sufficient to ensure that each state machine executes exactly the same commands in the same order. For example, a follower might be unavailable while the leader commits several log entries, then it could be elected leader and overwrite these entries with new ones; as a result, different state machines might execute different command sequences.
+
+前面的章节里描述了 Raft 算法是如何进行 leader 选举和日志复制的。然而，到目前为止描述的机制并不能充分地保证每一个状态机会按照相同的顺序执行相同的指令。例如，一个 follower 可能会进入不可用状态，在此期间，leader 可能提交了若干的日志条目，然后这个 follower 可能会被选举为 leader 并且用新的日志条目覆盖这些日志条目；结果，不同的状态机可能会执行不同的指令序列。
+
+
+
+
+
+## Election restriction (选举约束)
+
+如果仅根据前文所述的方式进行重新选举 leader 时，如果新选举出的 leader 的日志不完全包含上一个 leader 的日志，即使这些“丢失的”日志已经被复制到了大多数 follower 节点（甚至已经被提交），新的 leader 还是会把它们直接覆盖掉。这种结果显然是不正确的。
+
+> Raft uses the voting process to prevent a candidate from winning an election unless its log contains all committed entries. A candidate must contact a majority of the cluster in order to be elected, which means that every committed entry must be present in at least one of those servers. If the candidate’s log is at least as up-to-date as any other log in that majority (where “up-to-date” is defined precisely below), then it will hold all the committed entries. The RequestVote RPC implements this restriction: the RPC includes information about the candidate’s log, and the voter denies its vote if its own log is more up-to-date than that of the candidate.
+
+Candidate 为了赢得选举必须与集群中的过半节点通信，这意味着至少其中一个服务器节点包含了所有已提交的日志条目。（如果最新的commit log 不包含在里面，显然该log 是不会通过的）如果 candidate 的日志至少和过半的服务器节点一样新（接下来会精确地定义“新”），那么他一定包含了所有已经提交的日志条目。RequestVote RPC 执行了这样的限制： RPC 中包含了 candidate 的日志信息，如果投票者自己的日志比 candidate 的还新，它会拒绝掉该投票请求。
+
+
+
+> Raft determines which of two logs is more up-to-date by comparing the index and term of the last entries in the logs. If the logs have last entries with different terms, then the log with the later term is more up-to-date. If the logs end with the same term, then whichever log is longer is more up-to-date
+
+
+
+Raft 同步比较 term 和 index 来得出谁是更新的日志。
+
+```
+if node1.term > node2.term {
+		return node1
+}else if node1.term < node2.term {
+		return node2 
+}else{
+	if len(node1.logs) >= len(node2.logs) {
+		return node1 
+	}else{
+	  return node2  
+	}
+}
+```
+
+
+
+## Committing entries from previous terms 提交之前任期内的日志条目
+
+> As described in Section 5.3, a leader knows that an entry from its current term is committed once that entry is stored on a majority of the servers. If a leader crashes before committing an entry, future leaders will attempt to finish replicating the entry. However, a leader cannot immediately conclude that an entry from a previous term is committed once it is stored on a majority of servers. Figure 8 illustrates a situation where an old log entry is stored on a majority of servers, yet can still be overwritten by a future leader
+
+![image-20210420233103122](image-20210420233103122.png)
+
+
+
+1. 在(a) 中，S1是 leader ，S2复制了索引位置 2 的日志条目。 \<term1\> 
+2. 在(b) 中，S1 crashes,S5 被 S3 S4 和 S5 选举成新的leader,然后从客户端接收了一条不一样的日志条目放在了并将其写入引位置 2 的日志条目。\<term2\> 
+3. 在(c) 中， S5 crashes了,S1 重新启动了，选举成功，继续复制日志。此时，来自任期 2 的那条日志已经被复制到了集群中的大多数机器上，但是还没有被提交。\<term3\> 
+4. 在（d ) 中，如果S1 又 crashes 了，S5 有被选举成了，S5 可以重新被选举成功（通过来自 S2，S3 和 S4 的选票），然后覆盖了他们在索引 2 处的日志。\<term4\> 
+5. 但是，如果 S1 crashes之前，如果 S1 在自己的任期里复制了日志条目到大多数机器上，如 (e) 中，然后这个条目就会被提交（S5 就不可能选举成功）。在这种情况下，之前的所有日志也被提交了。(备注：这种情况是作为d的参照组)
+
+
+
+
+
+
+
+> To eliminate problems like the one in Figure 8, Raft never commits log entries from previous terms by counting replicas. Only log entries from the leader’s current term are committed by counting replicas; once an entry from the current term has been committed in this way, then all prior entries are committed indirectly because of the Log Matching Property. There are some situations where a leader could safely conclude that an older log entry is committed (for example, if that entry is stored on every server), but Raft takes a more conservative approach for simplicity.
+
+
+
+**`为了解决该问题Raft对于当前任期之前任期提交的日志，并不通过判断是否已经在半数以上集群节点写入成功来作为能否提交的依据。只有当前leader任期内的日志是通过比较写入数量是否超过半数来决定是否可以提交的。对于任期之前的日志，Raft采用的方式，是只要提交成功了当前任期的日志，那么在日志之前的日志就认为提交成功了。`**
+
+# 参考 
+Raft 算法原文 https://raft.github.io/raft.pdf
+Raft算法原理 https://www.codedump.info/post/20180921-raft/
+ETCD 原理分析（一）- Raft 算法原理 https://blog.didiyun.com/index.php/2019/02/27/etcd-raft/
+
+Two-Phase Commit https://www.cs.princeton.edu/courses/archive/fall16/cos418/docs/L6-2pc.pdf

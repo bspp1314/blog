@@ -22,3 +22,5 @@ go tool pprof -http=:8081 ~/pprof/pprof.samples.cpu.001.pb.gz
 
 其中-http=:8081会启动一个http服务,端口为8081,然后浏览器会弹出此文件的图解:
 
+
+

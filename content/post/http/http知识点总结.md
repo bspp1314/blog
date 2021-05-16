@@ -20,7 +20,7 @@ HTTP 是超文本传输协议，也就是**H**yperText **T**ransfer **P**rotocol
 
 ## HTTP 报文
 
-
+![image-20210504160449442](image-20210504160449442.png)
 
 ```http
 GET / HTTP/1.1
@@ -58,6 +58,8 @@ HTTP 请求报文的格式
 
 
 HTTP 响应报文格式
+
+![image-20210504161059186](image-20210504161059186.png)
 
 ```
 版本号 状态码 状态码信息
